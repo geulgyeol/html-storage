@@ -17,7 +17,9 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o geulgyeol-html-storage .
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o geulgyeol-html-storage .
 
 # Final stage
 FROM alpine:latest
@@ -26,7 +28,7 @@ FROM alpine:latest
 # Create data directory
 RUN mkdir -p /data
 
-WORKDIR /root/.
+WORKDIR /root
 
 # Copy the binary from builder
 COPY --from=builder /app/geulgyeol-html-storage .
