@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,10 +22,14 @@ func compressHTML(html string) string {
 	return buf.String()
 }
 
-func getPath(dataPath string, url string, blog string, timestamp int64) string {
+func getDir(dataPath string, timestamp int64) string {
 	t := time.Unix(timestamp, 0)
 	year, month, day := t.Date()
 
+	return filepath.Join(dataPath, fmt.Sprintf("%d", year), fmt.Sprintf("%02d", month), fmt.Sprintf("%02d", day))
+}
+
+func getFilename(url string, blog string) string {
 	// strip protocol
 	url = strings.ReplaceAll(url, "http://", "")
 	url = strings.ReplaceAll(url, "https://", "")
@@ -36,35 +42,55 @@ func getPath(dataPath string, url string, blog string, timestamp int64) string {
 	url = strings.ReplaceAll(url, "&", "_")
 	url = strings.ReplaceAll(url, "=", "_")
 
-	return fmt.Sprintf("%s/%d/%02d/%02d/%s_%s.html.gz", dataPath, year, month, day, blog, url)
+	return fmt.Sprintf("%s_%s.html.gz", blog, url)
 }
 
-func saveHTML(path string, compressedHTML string) error {
-	// save compressedHTML to path
-	// create directories if not exist
+func saveHTML(dir string, path string, compressedHTML string) error {
+	err := os.MkdirAll(dir, os.ModePerm)
+	if err != nil {
+		return err
+	}
+
+	fullPath := filepath.Join(dir, path)
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return err
+	}
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			fmt.Printf("Error closing file: %v\n", err)
+		}
+	}(file)
+
+	_, err = file.Write([]byte(compressedHTML))
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func main() {
 	gin.SetMode(gin.ReleaseMode)
-	
+
 	parser := argparse.NewParser("geulgyeol-html-storage", "A HTML storage server for Geulgyeol.")
 
 	port := parser.Int("p", "port", &argparse.Options{Default: 8080, Help: "Port to run the server on"})
-	err := parser.Parse(nil)
-	if err != nil {
-		panic(err)
-	}
-
 	dataPath := parser.String("d", "data-path", &argparse.Options{Default: "/data", Help: "Path to store HTML files"})
-	err = parser.Parse(nil)
+
+	err := parser.Parse(os.Args)
 	if err != nil {
 		panic(err)
 	}
 
 	r := gin.Default()
 
-	r.POST("/{id}", func(c *gin.Context) {
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+
+	r.POST("/:id", func(c *gin.Context) {
 		var json struct {
 			Body      string `json:"body"`
 			Blog      string `json:"blog"`
@@ -77,16 +103,20 @@ func main() {
 		}
 
 		compressedHTML := compressHTML(json.Body)
-		path := getPath(*dataPath, c.Param("id"), json.Blog, json.Timestamp)
-		err := saveHTML(path, compressedHTML)
+		dir := getDir(*dataPath, json.Timestamp)
+		path := getFilename(c.Param("id"), json.Blog)
+		err := saveHTML(dir, path, compressedHTML)
 
 		if err != nil {
+			fmt.Printf("Error saving HTML: %v\n", err)
 			c.JSON(500, gin.H{"error": "Failed to save HTML"})
 			return
 		}
 
 		c.JSON(200, gin.H{"status": "success"})
 	})
+
+	fmt.Printf("Starting server on port %d\n", *port)
 
 	// run the server
 	_ = r.Run(fmt.Sprintf(":%d", *port))
