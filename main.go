@@ -46,6 +46,8 @@ func saveHTML(path string, compressedHTML string) error {
 }
 
 func main() {
+	gin.SetMode(gin.ReleaseMode)
+	
 	parser := argparse.NewParser("geulgyeol-html-storage", "A HTML storage server for Geulgyeol.")
 
 	port := parser.Int("p", "port", &argparse.Options{Default: 8080, Help: "Port to run the server on"})
@@ -87,5 +89,5 @@ func main() {
 	})
 
 	// run the server
-	_ = r.Run(":" + string(rune(*port)))
+	_ = r.Run(fmt.Sprintf(":%d", *port))
 }
