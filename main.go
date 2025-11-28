@@ -92,7 +92,10 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 			return err
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".html.gz") {
-			relPath, _ := filepath.Rel(dataPath, path)
+			relPath, relErr := filepath.Rel(dataPath, path)
+			if relErr != nil {
+				return relErr
+			}
 			files = append(files, FileInfo{
 				Name:      info.Name(),
 				Path:      relPath,
@@ -141,7 +144,10 @@ func readFile(dataPath, year, month, day, filename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(absFilePath, absDataPath) {
+	// Clean paths and add separator suffix to ensure proper prefix matching
+	cleanDataPath := filepath.Clean(absDataPath) + string(filepath.Separator)
+	cleanFilePath := filepath.Clean(absFilePath)
+	if !strings.HasPrefix(cleanFilePath, cleanDataPath) {
 		return "", fmt.Errorf("invalid file path")
 	}
 
@@ -204,6 +210,7 @@ func main() {
 
 		files, total, err := listFiles(*dataPath, page, pageSize)
 		if err != nil {
+			fmt.Printf("Error listing files: %v\n", err)
 			c.JSON(500, gin.H{"error": "Failed to list files"})
 			return
 		}
@@ -229,6 +236,7 @@ func main() {
 				c.JSON(404, gin.H{"error": "File not found"})
 				return
 			}
+			fmt.Printf("Error reading file: %v\n", err)
 			c.JSON(500, gin.H{"error": "Failed to read file"})
 			return
 		}
