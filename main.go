@@ -14,7 +14,16 @@ import (
 
 	"github.com/akamensky/argparse"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	filePushTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "html_storage_file_push_total",
+		Help: "The total number of files pushed to the storage",
+	})
 )
 
 func compressHTML(html string) string {
@@ -270,6 +279,7 @@ func main() {
 			return
 		}
 
+		filePushTotal.Inc()
 		c.JSON(200, gin.H{"status": "success"})
 	})
 
