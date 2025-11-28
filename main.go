@@ -4,13 +4,26 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/akamensky/argparse"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	filePushTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "html_storage_file_push_total",
+		Help: "The total number of files pushed to the storage",
+	})
 )
 
 func compressHTML(html string) string {
@@ -71,6 +84,102 @@ func saveHTML(dir string, path string, compressedHTML string) error {
 	return nil
 }
 
+// FileInfo represents metadata about a stored HTML file
+type FileInfo struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// listFiles returns a paginated list of files in the data directory
+func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
+	var files []FileInfo
+
+	err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".html.gz") {
+			relPath, relErr := filepath.Rel(dataPath, path)
+			if relErr != nil {
+				return relErr
+			}
+			files = append(files, FileInfo{
+				Name:      info.Name(),
+				Path:      relPath,
+				Size:      info.Size(),
+				CreatedAt: info.ModTime().Format(time.RFC3339),
+			})
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Sort files by path for consistent pagination
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+
+	total := len(files)
+
+	// Apply pagination
+	start := (page - 1) * pageSize
+	if start >= total {
+		return []FileInfo{}, total, nil
+	}
+
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	return files[start:end], total, nil
+}
+
+// readFile reads and decompresses a stored HTML file
+func readFile(dataPath, year, month, day, filename string) (string, error) {
+	filePath := filepath.Join(dataPath, year, month, day, filename)
+
+	// Validate path to prevent directory traversal
+	absDataPath, err := filepath.Abs(dataPath)
+	if err != nil {
+		return "", err
+	}
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", err
+	}
+	// Clean paths and add separator suffix to ensure proper prefix matching
+	cleanDataPath := filepath.Clean(absDataPath) + string(filepath.Separator)
+	cleanFilePath := filepath.Clean(absFilePath)
+	if !strings.HasPrefix(cleanFilePath, cleanDataPath) {
+		return "", fmt.Errorf("invalid file path")
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		return "", err
+	}
+	defer gz.Close()
+
+	content, err := io.ReadAll(gz)
+	if err != nil {
+		return "", err
+	}
+
+	return string(content), nil
+}
+
 func main() {
 	gin.SetMode(gin.ReleaseMode)
 
@@ -86,8 +195,65 @@ func main() {
 
 	r := gin.Default()
 
+	// Prometheus metrics endpoint
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
+	})
+
+	// List files endpoint with pagination
+	r.GET("/files", func(c *gin.Context) {
+		page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if err != nil || page < 1 {
+			page = 1
+		}
+
+		pageSize, err := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+		if err != nil || pageSize < 1 {
+			pageSize = 20
+		}
+		if pageSize > 100 {
+			pageSize = 100
+		}
+
+		files, total, err := listFiles(*dataPath, page, pageSize)
+		if err != nil {
+			fmt.Printf("Error listing files: %v\n", err)
+			c.JSON(500, gin.H{"error": "Failed to list files"})
+			return
+		}
+
+		c.JSON(200, gin.H{
+			"files":    files,
+			"total":    total,
+			"page":     page,
+			"pageSize": pageSize,
+		})
+	})
+
+	// Read file endpoint
+	r.GET("/files/:year/:month/:day/:filename", func(c *gin.Context) {
+		year := c.Param("year")
+		month := c.Param("month")
+		day := c.Param("day")
+		filename := c.Param("filename")
+
+		content, err := readFile(*dataPath, year, month, day, filename)
+		if err != nil {
+			if os.IsNotExist(err) {
+				c.JSON(404, gin.H{"error": "File not found"})
+				return
+			}
+			fmt.Printf("Error reading file: %v\n", err)
+			c.JSON(500, gin.H{"error": "Failed to read file"})
+			return
+		}
+
+		c.JSON(200, gin.H{
+			"content": content,
+			"path":    filepath.Join(year, month, day, filename),
+		})
 	})
 
 	r.POST("/:id", func(c *gin.Context) {
@@ -113,6 +279,7 @@ func main() {
 			return
 		}
 
+		filePushTotal.Inc()
 		c.JSON(200, gin.H{"status": "success"})
 	})
 
