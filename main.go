@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akamensky/argparse"
@@ -91,10 +92,52 @@ type FileInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+var files []FileInfo
+var fileLastWalked time.Time = time.Time{}
+var fileWalkMutex = sync.RWMutex{}
+
+const cacheDuration = 10 * time.Minute
+
+func paginateFiles(files []FileInfo, page, pageSize int) []FileInfo {
+	start := (page - 1) * pageSize
+	if start >= len(files) {
+		return []FileInfo{}
+	}
+
+	end := start + pageSize
+	if end > len(files) {
+		end = len(files)
+	}
+
+	return files[start:end]
+}
+
 // listFiles returns a paginated list of files in the data directory
 func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
-	var files []FileInfo
+	fileWalkMutex.RLock()
+	cachedFiles := files
+	lastWalked := fileLastWalked
 
+	if cachedFiles != nil && time.Since(lastWalked) <= cacheDuration {
+		defer fileWalkMutex.RUnlock()
+		// Use cached data for pagination
+		total := len(cachedFiles)
+		return paginateFiles(cachedFiles, page, pageSize), total, nil
+	}
+
+	fileWalkMutex.RUnlock()
+	fileWalkMutex.Lock()
+	defer fileWalkMutex.Unlock()
+
+	// re-check after acquiring write lock
+	if files != nil && time.Since(fileLastWalked) <= cacheDuration {
+		total := len(files)
+		return paginateFiles(files, page, pageSize), total, nil
+	}
+
+	files = []FileInfo{}
+
+	// Go walk is deterministic, so files are in a consistent order
 	err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -118,7 +161,7 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 		return nil, 0, err
 	}
 
-	// Go walk is deterministic, so files are in a consistent order
+	fileLastWalked = time.Now()
 
 	total := len(files)
 
@@ -219,8 +262,8 @@ func main() {
 		if err != nil || pageSize < 1 {
 			pageSize = 20
 		}
-		if pageSize > 1000 {
-			pageSize = 1000
+		if pageSize > 100_000 {
+			pageSize = 100_000
 		}
 
 		files, total, err := listFiles(*dataPath, page, pageSize)
