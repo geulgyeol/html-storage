@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -119,10 +118,7 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 		return nil, 0, err
 	}
 
-	// Sort files by path for consistent pagination
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
+	// Go walk is deterministic, so files are in a consistent order
 
 	total := len(files)
 
@@ -164,13 +160,23 @@ func readFile(dataPath, year, month, day, filename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			fmt.Printf("Error closing file: %v\n", err)
+		}
+	}(file)
 
 	gz, err := gzip.NewReader(file)
 	if err != nil {
 		return "", err
 	}
-	defer gz.Close()
+	defer func(gz *gzip.Reader) {
+		err := gz.Close()
+		if err != nil {
+			fmt.Printf("Error closing gzip reader: %v\n", err)
+		}
+	}(gz)
 
 	content, err := io.ReadAll(gz)
 	if err != nil {
@@ -213,8 +219,8 @@ func main() {
 		if err != nil || pageSize < 1 {
 			pageSize = 20
 		}
-		if pageSize > 100 {
-			pageSize = 100
+		if pageSize > 1000 {
+			pageSize = 1000
 		}
 
 		files, total, err := listFiles(*dataPath, page, pageSize)
