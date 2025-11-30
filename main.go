@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/akamensky/argparse"
+	ginGzip "github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -244,6 +245,8 @@ func main() {
 
 	r := gin.Default()
 
+	r.Use(ginGzip.Gzip(ginGzip.DefaultCompression))
+
 	// Prometheus metrics endpoint
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
@@ -302,6 +305,42 @@ func main() {
 		c.JSON(200, gin.H{
 			"content": content,
 			"path":    filepath.Join(year, month, day, filename),
+		})
+	})
+
+	r.POST("/files/batch", func(c *gin.Context) {
+		// expecting an array of path strings
+		var paths []string
+		if err := c.BindJSON(&paths); err != nil {
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
+			return
+		}
+
+		type FileContent struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+
+		var results []FileContent
+
+		for _, path := range paths {
+			parts := strings.SplitN(path, "/", 4)
+			if len(parts) != 4 {
+				continue
+			}
+			year, month, day, filename := parts[0], parts[1], parts[2], parts[3]
+			content, err := readFile(*dataPath, year, month, day, filename)
+			if err != nil {
+				continue
+			}
+			results = append(results, FileContent{
+				path,
+				content,
+			})
+		}
+
+		c.JSON(200, gin.H{
+			"files": results,
 		})
 	})
 
