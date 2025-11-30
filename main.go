@@ -355,11 +355,11 @@ func main() {
 			return
 		}
 
-		compressedHTML := compressHTML(json.Body)
-		dir := getDir(*dataPath, json.Timestamp)
-		path := getFilename(c.Param("id"), json.Blog)
-
 		go func() {
+			compressedHTML := compressHTML(json.Body)
+			dir := getDir(*dataPath, json.Timestamp)
+			path := getFilename(c.Param("id"), json.Blog)
+
 			err := saveHTML(dir, path, compressedHTML)
 			if err != nil {
 				fmt.Printf("Error saving HTML: %v\n", err)
