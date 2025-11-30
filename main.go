@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/akamensky/argparse"
-	ginGzip "github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -245,7 +244,7 @@ func main() {
 
 	r := gin.Default()
 
-	r.Use(ginGzip.Gzip(ginGzip.DefaultCompression))
+	//r.Use(ginGzip.Gzip(ginGzip.DefaultCompression))
 
 	// Prometheus metrics endpoint
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
