@@ -288,18 +288,21 @@ func main() {
 				// read and ungzip
 				file, err := os.Open(path)
 				if err != nil {
-					return err
+					fmt.Printf("File open error during background recompression for %s: %v\n", path, err)
+					return nil
 				}
 				gz, err := gzip.NewReader(file)
 				if err != nil {
 					_ = file.Close()
-					return err
+					fmt.Printf("Gzip reader open error during background recompression for %s: %v\n", path, err)
+					return nil
 				}
 				content, err := io.ReadAll(gz)
 				_ = gz.Close()
 				_ = file.Close()
 				if err != nil {
-					return err
+					fmt.Printf("Read error during background recompression for %s: %v\n", path, err)
+					return nil
 				}
 
 				// recompress with zstd
@@ -308,12 +311,14 @@ func main() {
 				// overwrite file with zstd compressed data
 				err = os.WriteFile(newPath, compressedData, info.Mode())
 				if err != nil {
-					return err
+					fmt.Printf("File write error during background recompression for %s: %v\n", path, err)
+					return nil
 				}
 				// remove old .gz file
 				err = os.Remove(path)
 				if err != nil {
-					return err
+					fmt.Printf("File remove error during background recompression for %s: %v\n", path, err)
+					return nil
 				}
 				fmt.Printf("Recompressed %s to %s\n", path, newPath)
 			}
