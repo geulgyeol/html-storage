@@ -1,8 +1,7 @@
 # Build stage
 FROM --platform=$BUILDPLATFORM golang:1.24.3-alpine AS builder
 
-# Install build dependencies
-RUN apk add --no-cache git
+RUN apk add --no-cache git gcc musl-dev gcc-aarch64-none-elf
 
 # Set working directory
 WORKDIR /app
@@ -18,10 +17,14 @@ COPY . .
 
 ARG TARGETOS=linux
 ARG TARGETARCH
-RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage .
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        CGO_ENABLED=1 CC=aarch64-linux-musl-gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
+    else \
+        CGO_ENABLED=1 CC=gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
+    fi
 
 # Final stage
-FROM --platform=$TARGETPLATFORM alpine:latest
+FROM alpine:latest
 
 
 # Create data directory
