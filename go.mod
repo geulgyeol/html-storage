@@ -4,9 +4,9 @@ go 1.24.3
 
 require (
 	github.com/akamensky/argparse v1.4.0
-	github.com/gin-contrib/gzip v1.2.5
 	github.com/gin-gonic/gin v1.11.0
 	github.com/prometheus/client_golang v1.22.0
+	github.com/valyala/gozstd v1.24.0
 )
 
 require (

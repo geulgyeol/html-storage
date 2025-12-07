@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -17,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/valyala/gozstd"
 )
 
 var (
@@ -26,13 +26,18 @@ var (
 	})
 )
 
-func compressHTML(html string) string {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	_, _ = gz.Write([]byte(html))
-	_ = gz.Close()
+var cdict *gozstd.CDict
+var ddict *gozstd.DDict
 
-	return buf.String()
+func compressHTML(html string) []byte {
+	//var buf bytes.Buffer
+	//gz := gzip.NewWriter(&buf)
+	//_, _ = gz.Write([]byte(html))
+	//_ = gz.Close()
+
+	compressedData := gozstd.CompressDict(nil, []byte(html), cdict)
+
+	return compressedData
 }
 
 func getDir(dataPath string, timestamp int64) string {
@@ -55,10 +60,10 @@ func getFilename(url string, blog string) string {
 	url = strings.ReplaceAll(url, "&", "_")
 	url = strings.ReplaceAll(url, "=", "_")
 
-	return fmt.Sprintf("%s_%s.html.gz", blog, url)
+	return fmt.Sprintf("%s_%s.html.zst", blog, url)
 }
 
-func saveHTML(dir string, path string, compressedHTML string) error {
+func saveHTML(dir string, path string, compressedHTML []byte) error {
 	err := os.MkdirAll(dir, os.ModePerm)
 	if err != nil {
 		return err
@@ -76,7 +81,7 @@ func saveHTML(dir string, path string, compressedHTML string) error {
 		}
 	}(file)
 
-	_, err = file.Write([]byte(compressedHTML))
+	_, err = file.Write(compressedHTML)
 	if err != nil {
 		return err
 	}
@@ -210,23 +215,37 @@ func readFile(dataPath, year, month, day, filename string) (string, error) {
 		}
 	}(file)
 
-	gz, err := gzip.NewReader(file)
-	if err != nil {
-		return "", err
-	}
-	defer func(gz *gzip.Reader) {
-		err := gz.Close()
+	if strings.HasSuffix(filename, ".zst") {
+		compressedData, err := io.ReadAll(file)
 		if err != nil {
-			fmt.Printf("Error closing gzip reader: %v\n", err)
+			return "", err
 		}
-	}(gz)
+		decompressedData, err := gozstd.DecompressDict(nil, compressedData, ddict)
+		if err != nil {
+			return "", err
+		}
+		return string(decompressedData), nil
+	} else if !strings.HasSuffix(filename, ".html.gz") {
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return "", err
+		}
+		defer func(gz *gzip.Reader) {
+			err := gz.Close()
+			if err != nil {
+				fmt.Printf("Error closing gzip reader: %v\n", err)
+			}
+		}(gz)
 
-	content, err := io.ReadAll(gz)
-	if err != nil {
-		return "", err
+		content, err := io.ReadAll(gz)
+		if err != nil {
+			return "", err
+		}
+
+		return string(content), nil
 	}
 
-	return string(content), nil
+	return "", fmt.Errorf("unsupported file format")
 }
 
 func main() {
@@ -236,11 +255,74 @@ func main() {
 
 	port := parser.Int("p", "port", &argparse.Options{Default: 8080, Help: "Port to run the server on"})
 	dataPath := parser.String("d", "data-path", &argparse.Options{Default: "/data", Help: "Path to store HTML files"})
+	zstdDictionaryPath := parser.String("z", "zstd-dictionary", &argparse.Options{Default: "./zstd_dict", Help: "Path to Zstd dictionary file"})
 
 	err := parser.Parse(os.Args)
 	if err != nil {
 		panic(err)
 	}
+
+	// Load Zstd dictionary
+	dictData, err := os.ReadFile(*zstdDictionaryPath)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to read Zstd dictionary: %v", err))
+	}
+
+	cdict, err = gozstd.NewCDictLevel(dictData, 9)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create Zstd dictionary: %v", err))
+	}
+	ddict, err = gozstd.NewDDict(dictData)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create Zstd dictionary: %v", err))
+	}
+
+	// In background, find .gz files under dataPath and ungzip, then recompress with zstd and save
+	go func() {
+		err := filepath.Walk(*dataPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && strings.HasSuffix(info.Name(), ".html.gz") {
+				newPath := strings.TrimSuffix(path, ".gz") + ".zst"
+				// read and ungzip
+				file, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				gz, err := gzip.NewReader(file)
+				if err != nil {
+					_ = file.Close()
+					return err
+				}
+				content, err := io.ReadAll(gz)
+				_ = gz.Close()
+				_ = file.Close()
+				if err != nil {
+					return err
+				}
+
+				// recompress with zstd
+				compressedData := gozstd.CompressDict(nil, content, cdict)
+
+				// overwrite file with zstd compressed data
+				err = os.WriteFile(newPath, compressedData, info.Mode())
+				if err != nil {
+					return err
+				}
+				// remove old .gz file
+				err = os.Remove(path)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Recompressed %s to %s\n", path, newPath)
+			}
+			return nil
+		})
+		if err != nil {
+			fmt.Printf("Error during background recompression: %v\n", err)
+		}
+	}()
 
 	r := gin.Default()
 
