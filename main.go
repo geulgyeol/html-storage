@@ -101,7 +101,7 @@ var files []FileInfo
 var fileLastWalked time.Time = time.Time{}
 var fileWalkMutex = sync.RWMutex{}
 
-const cacheDuration = 10 * time.Minute
+const cacheDuration = 30 * time.Minute
 
 func paginateFiles(files []FileInfo, page, pageSize int) []FileInfo {
 	start := (page - 1) * pageSize
@@ -147,7 +147,7 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".html.gz") {
+		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".html.gz") || strings.HasSuffix(info.Name(), ".html.zst")) {
 			relPath, relErr := filepath.Rel(dataPath, path)
 			if relErr != nil {
 				return relErr
