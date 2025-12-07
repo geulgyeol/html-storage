@@ -1,7 +1,7 @@
 # Build stage
 FROM --platform=$BUILDPLATFORM golang:1.24.3-alpine AS builder
 
-RUN apk add --no-cache git gcc musl-dev gcc-arm-none-eabi
+RUN apk add --no-cache git gcc musl-dev gcc-arm-linux-gnueabi
 
 # Set working directory
 WORKDIR /app
@@ -18,7 +18,7 @@ COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        CGO_ENABLED=1 CC=arm-none-eabi-gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
+        CGO_ENABLED=1 CC=arm-linux-gnueabi-gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
     else \
         CGO_ENABLED=1 CC=gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
     fi
