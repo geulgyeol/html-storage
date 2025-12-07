@@ -41,6 +41,8 @@ WORKDIR /root
 # Copy the binary from builder
 COPY --from=builder /app/geulgyeol-html-storage .
 
+COPY --from=builder /app/zstd_dict ./zstd_dict
+
 # Expose the default port
 EXPOSE 8080
 
