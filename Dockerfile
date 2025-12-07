@@ -30,7 +30,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
     fi
 
 # Final stage
-FROM alpine:latest
+FROM debian:stable-slim
 
 
 # Create data directory
