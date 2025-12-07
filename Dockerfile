@@ -18,7 +18,7 @@ COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        CGO_ENABLED=1 CC=aarch64-linux-musl-gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
+        CGO_ENABLED=1 CC=aarch64-none-elf-cpp GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
     else \
         CGO_ENABLED=1 CC=gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
     fi
