@@ -18,7 +18,7 @@ COPY . .
 
 ARG TARGETOS=linux
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o geulgyeol-html-storage .
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage .
 
 # Final stage
 FROM --platform=$TARGETPLATFORM alpine:latest
