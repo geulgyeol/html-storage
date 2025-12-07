@@ -3,9 +3,9 @@ FROM --platform=$BUILDPLATFORM ubuntu/go:1.24-25.04_edge AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    gcc \
+    build-essential \
     libc6-dev \
-    gcc-arm-linux-gnueabi \
+    gcc-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,7 +24,7 @@ COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        CGO_ENABLED=1 CC=arm-linux-gnueabi-gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
+        CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
     else \
         CGO_ENABLED=1 CC=gcc GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o geulgyeol-html-storage . ; \
     fi
