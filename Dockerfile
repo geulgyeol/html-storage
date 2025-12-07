@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     gcc \
     libc6-dev \
-    gcc-aarch64-linux-gnu \
+    gcc-arm-linux-gnueabi \
     libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
