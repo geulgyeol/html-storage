@@ -1,7 +1,13 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.24.3-alpine AS builder
+FROM --platform=$BUILDPLATFORM ubuntu/go:1.24-25.04_edge AS builder
 
-RUN apk add --no-cache git gcc musl-dev gcc-arm-linux-gnueabi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    gcc \
+    libc6-dev \
+    gcc-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
