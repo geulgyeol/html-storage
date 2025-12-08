@@ -2,8 +2,10 @@ package main
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -117,6 +119,80 @@ func paginateFiles(files []FileInfo, page, pageSize int) []FileInfo {
 	return files[start:end]
 }
 
+func isBeforeToday(today time.Time, year, month, day string) bool {
+	yearInt, err := strconv.Atoi(year)
+	if err != nil {
+		return false
+	}
+
+	monthInt, err := strconv.Atoi(month)
+	if err != nil {
+		return false
+	}
+
+	dayInt, err := strconv.Atoi(day)
+	if err != nil {
+		return false
+	}
+
+	date := time.Date(yearInt, time.Month(monthInt), dayInt, 0, 0, 0, 0, today.Location())
+	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+
+	return date.Before(todayStart)
+}
+
+func buildFileInfo(name, relPath string, info os.FileInfo) FileInfo {
+	return FileInfo{
+		Name:      name,
+		Path:      relPath,
+		Size:      info.Size(),
+		CreatedAt: info.ModTime().Format(time.RFC3339),
+	}
+}
+
+func loadCachedDayFiles(dayDir string, year string, month string, day string) ([]FileInfo, error) {
+	cachePath := filepath.Join(dayDir, "files.json")
+	cacheData, err := os.ReadFile(cachePath)
+	if err == nil {
+		var cached []FileInfo
+		if unmarshalErr := json.Unmarshal(cacheData, &cached); unmarshalErr == nil {
+			return cached, nil
+		}
+	}
+
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var infos []FileInfo
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".html.gz") && !strings.HasSuffix(name, ".html.zst") {
+			continue
+		}
+
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+
+		relPath := filepath.Join(year, month, day, name)
+		infos = append(infos, buildFileInfo(name, relPath, info))
+	}
+
+	cacheData, err = json.MarshalIndent(infos, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(cachePath, cacheData, 0o644)
+	}
+
+	return infos, nil
+}
+
 // listFiles returns a paginated list of files in the data directory
 func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 	fileWalkMutex.RLock()
@@ -142,25 +218,53 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 
 	files = []FileInfo{}
 
+	today := time.Now()
+
 	// Go walk is deterministic, so files are in a consistent order
-	err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(dataPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// return err
 			return nil
 		}
-		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".html.gz") || strings.HasSuffix(info.Name(), ".html.zst")) {
+
+		if d.IsDir() {
 			relPath, relErr := filepath.Rel(dataPath, path)
 			if relErr != nil {
-				// return relErr
 				return nil
 			}
-			files = append(files, FileInfo{
-				Name:      info.Name(),
-				Path:      relPath,
-				Size:      info.Size(),
-				CreatedAt: info.ModTime().Format(time.RFC3339),
-			})
+
+			parts := strings.Split(relPath, string(filepath.Separator))
+			if len(parts) == 3 {
+				year, month, day := parts[0], parts[1], parts[2]
+
+				if isBeforeToday(today, year, month, day) {
+					cachedFiles, cacheErr := loadCachedDayFiles(path, year, month, day)
+					if cacheErr == nil {
+						files = append(files, cachedFiles...)
+						return fs.SkipDir
+					}
+				}
+			}
+
+			return nil
 		}
+
+		name := d.Name()
+		if !strings.HasSuffix(name, ".html.gz") && !strings.HasSuffix(name, ".html.zst") {
+			return nil
+		}
+
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(dataPath, path)
+		if relErr != nil {
+			return nil
+		}
+
+		files = append(files, buildFileInfo(name, relPath, info))
+
 		return nil
 	})
 
@@ -315,6 +419,9 @@ func main() {
 				if err != nil {
 					fmt.Printf("File write error during background recompression for %s: %v\n", path, err)
 					return nil
+				}
+				if chtimesErr := os.Chtimes(newPath, info.ModTime(), info.ModTime()); chtimesErr != nil {
+					fmt.Printf("File time preserve error during background recompression for %s: %v\n", path, chtimesErr)
 				}
 				// remove old .gz file
 				err = os.Remove(path)
