@@ -145,12 +145,14 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 	// Go walk is deterministic, so files are in a consistent order
 	err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			// return err
+			return nil
 		}
 		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".html.gz") || strings.HasSuffix(info.Name(), ".html.zst")) {
 			relPath, relErr := filepath.Rel(dataPath, path)
 			if relErr != nil {
-				return relErr
+				// return relErr
+				return nil
 			}
 			files = append(files, FileInfo{
 				Name:      info.Name(),
