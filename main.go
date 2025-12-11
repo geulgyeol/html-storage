@@ -196,14 +196,13 @@ func loadCachedDayFiles(dayDir string, year string, month string, day string) ([
 // listFiles returns a paginated list of files in the data directory
 func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 	fileWalkMutex.RLock()
-	cachedFiles := files
 	lastWalked := fileLastWalked
 
-	if cachedFiles != nil && time.Since(lastWalked) <= cacheDuration {
-		defer fileWalkMutex.RUnlock()
-		// Use cached data for pagination
-		total := len(cachedFiles)
-		return paginateFiles(cachedFiles, page, pageSize), total, nil
+	if files != nil && time.Since(lastWalked) <= cacheDuration {
+		total := len(files)
+		result := paginateFiles(files, page, pageSize)
+		fileWalkMutex.RUnlock()
+		return result, total, nil
 	}
 
 	fileWalkMutex.RUnlock()
@@ -216,7 +215,8 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 		return paginateFiles(files, page, pageSize), total, nil
 	}
 
-	files = []FileInfo{}
+	// Reset and pre-allocate with reasonable capacity to reduce allocations
+	files = make([]FileInfo, 0, 10000)
 
 	today := time.Now()
 
@@ -331,7 +331,7 @@ func readFile(dataPath, year, month, day, filename string) (string, error) {
 			return "", err
 		}
 		return string(decompressedData), nil
-	} else if !strings.HasSuffix(filename, ".html.gz") {
+	} else if strings.HasSuffix(filename, ".html.gz") {
 		gz, err := gzip.NewReader(file)
 		if err != nil {
 			return "", err
