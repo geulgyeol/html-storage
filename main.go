@@ -99,25 +99,17 @@ type FileInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-var files []FileInfo
-var fileLastWalked time.Time = time.Time{}
-var fileWalkMutex = sync.RWMutex{}
+// cachedDirInfo stores minimal info about a directory for efficient counting
+type cachedDirInfo struct {
+	fileCount int
+	files     []FileInfo // only populated when needed
+}
+
+var totalFileCount int
+var totalCountLastWalked time.Time = time.Time{}
+var countMutex = sync.RWMutex{}
 
 const cacheDuration = 30 * time.Minute
-
-func paginateFiles(files []FileInfo, page, pageSize int) []FileInfo {
-	start := (page - 1) * pageSize
-	if start >= len(files) {
-		return []FileInfo{}
-	}
-
-	end := start + pageSize
-	if end > len(files) {
-		end = len(files)
-	}
-
-	return files[start:end]
-}
 
 func isBeforeToday(today time.Time, year, month, day string) bool {
 	yearInt, err := strconv.Atoi(year)
@@ -193,34 +185,56 @@ func loadCachedDayFiles(dayDir string, year string, month string, day string) ([
 	return infos, nil
 }
 
-// listFiles returns a paginated list of files in the data directory
-func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
-	fileWalkMutex.RLock()
-	lastWalked := fileLastWalked
-
-	if files != nil && time.Since(lastWalked) <= cacheDuration {
-		total := len(files)
-		result := paginateFiles(files, page, pageSize)
-		fileWalkMutex.RUnlock()
-		return result, total, nil
+// countCachedDayFiles returns just the count from a cached day directory
+func countCachedDayFiles(dayDir string) (int, error) {
+	cachePath := filepath.Join(dayDir, "files.json")
+	cacheData, err := os.ReadFile(cachePath)
+	if err == nil {
+		var cached []FileInfo
+		if unmarshalErr := json.Unmarshal(cacheData, &cached); unmarshalErr == nil {
+			return len(cached), nil
+		}
 	}
 
-	fileWalkMutex.RUnlock()
-	fileWalkMutex.Lock()
-	defer fileWalkMutex.Unlock()
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".html.gz") || strings.HasSuffix(name, ".html.zst") {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// getTotalFileCount returns the total count of files, using cached count if available
+func getTotalFileCount(dataPath string) (int, error) {
+	countMutex.RLock()
+	if totalFileCount > 0 && time.Since(totalCountLastWalked) <= cacheDuration {
+		count := totalFileCount
+		countMutex.RUnlock()
+		return count, nil
+	}
+	countMutex.RUnlock()
+
+	countMutex.Lock()
+	defer countMutex.Unlock()
 
 	// re-check after acquiring write lock
-	if files != nil && time.Since(fileLastWalked) <= cacheDuration {
-		total := len(files)
-		return paginateFiles(files, page, pageSize), total, nil
+	if totalFileCount > 0 && time.Since(totalCountLastWalked) <= cacheDuration {
+		return totalFileCount, nil
 	}
 
-	// Reset and pre-allocate with reasonable capacity to reduce allocations
-	files = make([]FileInfo, 0, 10000)
-
+	count := 0
 	today := time.Now()
 
-	// Go walk is deterministic, so files are in a consistent order
 	err := filepath.WalkDir(dataPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -237,46 +251,41 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 				year, month, day := parts[0], parts[1], parts[2]
 
 				if isBeforeToday(today, year, month, day) {
-					cachedFiles, cacheErr := loadCachedDayFiles(path, year, month, day)
+					dayCount, cacheErr := countCachedDayFiles(path)
 					if cacheErr == nil {
-						files = append(files, cachedFiles...)
+						count += dayCount
 						return fs.SkipDir
 					}
 				}
 			}
-
 			return nil
 		}
 
 		name := d.Name()
-		if !strings.HasSuffix(name, ".html.gz") && !strings.HasSuffix(name, ".html.zst") {
-			return nil
+		if strings.HasSuffix(name, ".html.gz") || strings.HasSuffix(name, ".html.zst") {
+			count++
 		}
-
-		info, infoErr := d.Info()
-		if infoErr != nil {
-			return nil
-		}
-
-		relPath, relErr := filepath.Rel(dataPath, path)
-		if relErr != nil {
-			return nil
-		}
-
-		files = append(files, buildFileInfo(name, relPath, info))
-
 		return nil
 	})
 
 	if err != nil {
+		return 0, err
+	}
+
+	totalFileCount = count
+	totalCountLastWalked = time.Now()
+	return count, nil
+}
+
+// listFiles returns a paginated list of files in the data directory
+// Memory-efficient: only loads files needed for the requested page
+func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
+	// Get total count first (this is cached)
+	total, err := getTotalFileCount(dataPath)
+	if err != nil {
 		return nil, 0, err
 	}
 
-	fileLastWalked = time.Now()
-
-	total := len(files)
-
-	// Apply pagination
 	start := (page - 1) * pageSize
 	if start >= total {
 		return []FileInfo{}, total, nil
@@ -287,7 +296,91 @@ func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
 		end = total
 	}
 
-	return files[start:end], total, nil
+	// Stream through files, only collecting what we need for this page
+	result := make([]FileInfo, 0, pageSize)
+	currentIndex := 0
+	today := time.Now()
+
+	err = filepath.WalkDir(dataPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		// Stop walking if we have enough files
+		if len(result) >= pageSize {
+			return fs.SkipAll
+		}
+
+		if d.IsDir() {
+			relPath, relErr := filepath.Rel(dataPath, path)
+			if relErr != nil {
+				return nil
+			}
+
+			parts := strings.Split(relPath, string(filepath.Separator))
+			if len(parts) == 3 {
+				year, month, day := parts[0], parts[1], parts[2]
+
+				if isBeforeToday(today, year, month, day) {
+					cachedFiles, cacheErr := loadCachedDayFiles(path, year, month, day)
+					if cacheErr == nil {
+						dirFileCount := len(cachedFiles)
+
+						// Check if this directory's files overlap with our page range
+						if currentIndex+dirFileCount <= start {
+							// All files in this dir are before our page, skip
+							currentIndex += dirFileCount
+							return fs.SkipDir
+						}
+
+						// Some files from this dir are in our page range
+						for _, f := range cachedFiles {
+							if currentIndex >= start && currentIndex < end {
+								result = append(result, f)
+								if len(result) >= pageSize {
+									return fs.SkipAll
+								}
+							}
+							currentIndex++
+						}
+						return fs.SkipDir
+					}
+				}
+			}
+			return nil
+		}
+
+		name := d.Name()
+		if !strings.HasSuffix(name, ".html.gz") && !strings.HasSuffix(name, ".html.zst") {
+			return nil
+		}
+
+		// Only fetch file info if this file is in our page range
+		if currentIndex >= start && currentIndex < end {
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				currentIndex++
+				return nil
+			}
+
+			relPath, relErr := filepath.Rel(dataPath, path)
+			if relErr != nil {
+				currentIndex++
+				return nil
+			}
+
+			result = append(result, buildFileInfo(name, relPath, info))
+		}
+
+		currentIndex++
+		return nil
+	})
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return result, total, nil
 }
 
 // readFile reads and decompresses a stored HTML file
