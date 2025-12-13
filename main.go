@@ -392,7 +392,6 @@ func main() {
 	// every 10 minutes, update estimated total from pebble db
 	go func() {
 		for {
-			time.Sleep(10 * time.Minute)
 			var count int64 = 0
 			iter, err := db.NewIter(&pebble.IterOptions{})
 			if err != nil {
@@ -409,6 +408,8 @@ func main() {
 			estimatedTotalMutex.Lock()
 			estimatedTotal = count
 			estimatedTotalMutex.Unlock()
+
+			time.Sleep(10 * time.Minute)
 		}
 	}()
 
