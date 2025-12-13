@@ -5,15 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/akamensky/argparse"
+	"github.com/cockroachdb/pebble"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -91,7 +90,6 @@ func saveHTML(dir string, path string, compressedHTML []byte) error {
 	return nil
 }
 
-// FileInfo represents metadata about a stored HTML file
 type FileInfo struct {
 	Name      string `json:"name"`
 	Path      string `json:"path"`
@@ -99,288 +97,48 @@ type FileInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// cachedDirInfo stores minimal info about a directory for efficient counting
-type cachedDirInfo struct {
-	fileCount int
-	files     []FileInfo // only populated when needed
-}
-
-var totalFileCount int
-var totalCountLastWalked time.Time = time.Time{}
-var countMutex = sync.RWMutex{}
-
-const cacheDuration = 30 * time.Minute
-
-func isBeforeToday(today time.Time, year, month, day string) bool {
-	yearInt, err := strconv.Atoi(year)
-	if err != nil {
-		return false
-	}
-
-	monthInt, err := strconv.Atoi(month)
-	if err != nil {
-		return false
-	}
-
-	dayInt, err := strconv.Atoi(day)
-	if err != nil {
-		return false
-	}
-
-	date := time.Date(yearInt, time.Month(monthInt), dayInt, 0, 0, 0, 0, today.Location())
-	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
-
-	return date.Before(todayStart)
-}
-
-func buildFileInfo(name, relPath string, info os.FileInfo) FileInfo {
-	return FileInfo{
-		Name:      name,
-		Path:      relPath,
-		Size:      info.Size(),
-		CreatedAt: info.ModTime().Format(time.RFC3339),
-	}
-}
-
-func loadCachedDayFiles(dayDir string, year string, month string, day string) ([]FileInfo, error) {
-	cachePath := filepath.Join(dayDir, "files.json")
-	cacheData, err := os.ReadFile(cachePath)
-	if err == nil {
-		var cached []FileInfo
-		if unmarshalErr := json.Unmarshal(cacheData, &cached); unmarshalErr == nil {
-			return cached, nil
-		}
-	}
-
-	entries, err := os.ReadDir(dayDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var infos []FileInfo
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".html.gz") && !strings.HasSuffix(name, ".html.zst") {
-			continue
-		}
-
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			continue
-		}
-
-		relPath := filepath.Join(year, month, day, name)
-		infos = append(infos, buildFileInfo(name, relPath, info))
-	}
-
-	cacheData, err = json.MarshalIndent(infos, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(cachePath, cacheData, 0o644)
-	}
-
-	return infos, nil
-}
-
-// countCachedDayFiles returns just the count from a cached day directory
-func countCachedDayFiles(dayDir string) (int, error) {
-	cachePath := filepath.Join(dayDir, "files.json")
-	cacheData, err := os.ReadFile(cachePath)
-	if err == nil {
-		var cached []FileInfo
-		if unmarshalErr := json.Unmarshal(cacheData, &cached); unmarshalErr == nil {
-			return len(cached), nil
-		}
-	}
-
-	entries, err := os.ReadDir(dayDir)
-	if err != nil {
-		return 0, err
-	}
-
-	count := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".html.gz") || strings.HasSuffix(name, ".html.zst") {
-			count++
-		}
-	}
-	return count, nil
-}
-
-// getTotalFileCount returns the total count of files, using cached count if available
-func getTotalFileCount(dataPath string) (int, error) {
-	countMutex.RLock()
-	if totalFileCount > 0 && time.Since(totalCountLastWalked) <= cacheDuration {
-		count := totalFileCount
-		countMutex.RUnlock()
-		return count, nil
-	}
-	countMutex.RUnlock()
-
-	countMutex.Lock()
-	defer countMutex.Unlock()
-
-	// re-check after acquiring write lock
-	if totalFileCount > 0 && time.Since(totalCountLastWalked) <= cacheDuration {
-		return totalFileCount, nil
-	}
-
-	count := 0
-	today := time.Now()
-
-	err := filepath.WalkDir(dataPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		if d.IsDir() {
-			relPath, relErr := filepath.Rel(dataPath, path)
-			if relErr != nil {
-				return nil
-			}
-
-			parts := strings.Split(relPath, string(filepath.Separator))
-			if len(parts) == 3 {
-				year, month, day := parts[0], parts[1], parts[2]
-
-				if isBeforeToday(today, year, month, day) {
-					dayCount, cacheErr := countCachedDayFiles(path)
-					if cacheErr == nil {
-						count += dayCount
-						return fs.SkipDir
-					}
-				}
-			}
-			return nil
-		}
-
-		name := d.Name()
-		if strings.HasSuffix(name, ".html.gz") || strings.HasSuffix(name, ".html.zst") {
-			count++
-		}
-		return nil
-	})
-
-	if err != nil {
-		return 0, err
-	}
-
-	totalFileCount = count
-	totalCountLastWalked = time.Now()
-	return count, nil
-}
-
 // listFiles returns a paginated list of files in the data directory
-// Memory-efficient: only loads files needed for the requested page
-func listFiles(dataPath string, page, pageSize int) ([]FileInfo, int, error) {
-	// Get total count first (this is cached)
-	total, err := getTotalFileCount(dataPath)
+func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
+	var files []FileInfo
+	iter, err := db.NewIter(&pebble.IterOptions{})
 	if err != nil {
 		return nil, 0, err
 	}
 
-	start := (page - 1) * pageSize
-	if start >= total {
-		return []FileInfo{}, total, nil
-	}
-
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
-
-	// Stream through files, only collecting what we need for this page
-	result := make([]FileInfo, 0, pageSize)
-	currentIndex := 0
-	today := time.Now()
-
-	err = filepath.WalkDir(dataPath, func(path string, d fs.DirEntry, err error) error {
+	defer func(iter *pebble.Iterator) {
+		err := iter.Close()
 		if err != nil {
-			return nil
+			fmt.Printf("Error closing iterator: %v\n", err)
 		}
+	}(iter)
 
-		// Stop walking if we have enough files
-		if len(result) >= pageSize {
-			return fs.SkipAll
+	total := db.Metrics().Compact.Count
+
+	skipped := (page - 1) * pageSize
+	count := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		if skipped > 0 {
+			skipped--
+			continue
 		}
-
-		if d.IsDir() {
-			relPath, relErr := filepath.Rel(dataPath, path)
-			if relErr != nil {
-				return nil
-			}
-
-			parts := strings.Split(relPath, string(filepath.Separator))
-			if len(parts) == 3 {
-				year, month, day := parts[0], parts[1], parts[2]
-
-				if isBeforeToday(today, year, month, day) {
-					cachedFiles, cacheErr := loadCachedDayFiles(path, year, month, day)
-					if cacheErr == nil {
-						dirFileCount := len(cachedFiles)
-
-						// Check if this directory's files overlap with our page range
-						if currentIndex+dirFileCount <= start {
-							// All files in this dir are before our page, skip
-							currentIndex += dirFileCount
-							return fs.SkipDir
-						}
-
-						// Some files from this dir are in our page range
-						for _, f := range cachedFiles {
-							if currentIndex >= start && currentIndex < end {
-								result = append(result, f)
-								if len(result) >= pageSize {
-									return fs.SkipAll
-								}
-							}
-							currentIndex++
-						}
-						return fs.SkipDir
-					}
-				}
-			}
-			return nil
+		if count >= pageSize {
+			break
 		}
-
-		name := d.Name()
-		if !strings.HasSuffix(name, ".html.gz") && !strings.HasSuffix(name, ".html.zst") {
-			return nil
+		var dbValue FileMetadata
+		err := json.Unmarshal(iter.Value(), &dbValue)
+		if err != nil {
+			return nil, 0, err
 		}
-
-		// Only fetch file info if this file is in our page range
-		if currentIndex >= start && currentIndex < end {
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				currentIndex++
-				return nil
-			}
-
-			relPath, relErr := filepath.Rel(dataPath, path)
-			if relErr != nil {
-				currentIndex++
-				return nil
-			}
-
-			result = append(result, buildFileInfo(name, relPath, info))
-		}
-
-		currentIndex++
-		return nil
-	})
-
-	if err != nil {
-		return nil, 0, err
+		files = append(files, FileInfo{
+			Name:      dbValue.Name,
+			Path:      dbValue.Path,
+			Size:      dbValue.Size,
+			CreatedAt: time.Unix(dbValue.Timestamp, 0).Format(time.RFC3339),
+		})
+		count++
 	}
 
-	return result, total, nil
+	return files, total, nil
 }
 
 // readFile reads and decompresses a stored HTML file
@@ -447,6 +205,48 @@ func readFile(dataPath, year, month, day, filename string) (string, error) {
 	return "", fmt.Errorf("unsupported file format")
 }
 
+type FileMetadata struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Timestamp  int64  `json:"timestamp"`
+	Size       int64  `json:"size"`
+	IsArchived bool   `json:"is_archived"`
+}
+
+func addFileToPebble(db *pebble.DB, name, filePath string, timestamp, size int64) error {
+	dbKey := []byte(filePath)
+	dbValue := FileMetadata{
+		Name:       name,
+		Path:       filePath,
+		Timestamp:  timestamp,
+		Size:       size,
+		IsArchived: false,
+	}
+
+	valueBytes, err := json.Marshal(dbValue)
+	if err != nil {
+		return err
+	}
+
+	return db.Set(dbKey, valueBytes, pebble.Sync)
+}
+
+func getFileFromPebble(db *pebble.DB, filePath string) (FileMetadata, error) {
+	dbKey := []byte(filePath)
+	valueBytes, closer, err := db.Get(dbKey)
+	if err != nil {
+		return FileMetadata{}, err
+	}
+	_ = closer.Close()
+
+	var dbValue FileMetadata
+	err = json.Unmarshal(valueBytes, &dbValue)
+	if err != nil {
+		return FileMetadata{}, err
+	}
+	return dbValue, nil
+}
+
 func main() {
 	gin.SetMode(gin.ReleaseMode)
 
@@ -455,6 +255,8 @@ func main() {
 	port := parser.Int("p", "port", &argparse.Options{Default: 8080, Help: "Port to run the server on"})
 	dataPath := parser.String("d", "data-path", &argparse.Options{Default: "/data", Help: "Path to store HTML files"})
 	zstdDictionaryPath := parser.String("z", "zstd-dictionary", &argparse.Options{Default: "./zstd_dict", Help: "Path to Zstd dictionary file"})
+	doZstdMigration := parser.Flag("", "do-zstd-migration", &argparse.Options{Help: "Perform background migration from Gzip to Zstd compression", Default: false})
+	doPebbleMigration := parser.Flag("", "do-pebble-migration", &argparse.Options{Help: "Perform background migration to Pebble DB storage", Default: false})
 
 	err := parser.Parse(os.Args)
 	if err != nil {
@@ -476,60 +278,108 @@ func main() {
 		panic(fmt.Sprintf("Failed to create Zstd dictionary: %v", err))
 	}
 
-	// In background, find .gz files under dataPath and ungzip, then recompress with zstd and save
-	go func() {
-		err := filepath.Walk(*dataPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() && strings.HasSuffix(info.Name(), ".html.gz") {
-				newPath := strings.TrimSuffix(path, ".gz") + ".zst"
-				// read and ungzip
-				file, err := os.Open(path)
-				if err != nil {
-					fmt.Printf("File open error during background recompression for %s: %v\n", path, err)
-					return nil
-				}
-				gz, err := gzip.NewReader(file)
-				if err != nil {
-					_ = file.Close()
-					fmt.Printf("Gzip reader open error during background recompression for %s: %v\n", path, err)
-					return nil
-				}
-				content, err := io.ReadAll(gz)
-				_ = gz.Close()
-				_ = file.Close()
-				if err != nil {
-					fmt.Printf("Read error during background recompression for %s: %v\n", path, err)
-					return nil
-				}
+	// load pebble db for metadata
+	pebblePath := filepath.Join(*dataPath, "pebble_db")
+	os.MkdirAll(pebblePath, os.ModePerm)
+	db, err := pebble.Open(pebblePath, &pebble.Options{})
+	if err != nil {
+		panic(err)
+	}
 
-				// recompress with zstd
-				compressedData := gozstd.CompressDict(nil, content, cdict)
-
-				// overwrite file with zstd compressed data
-				err = os.WriteFile(newPath, compressedData, info.Mode())
-				if err != nil {
-					fmt.Printf("File write error during background recompression for %s: %v\n", path, err)
-					return nil
-				}
-				if chtimesErr := os.Chtimes(newPath, info.ModTime(), info.ModTime()); chtimesErr != nil {
-					fmt.Printf("File time preserve error during background recompression for %s: %v\n", path, chtimesErr)
-				}
-				// remove old .gz file
-				err = os.Remove(path)
-				if err != nil {
-					fmt.Printf("File remove error during background recompression for %s: %v\n", path, err)
-					return nil
-				}
-				fmt.Printf("Recompressed %s to %s\n", path, newPath)
-			}
-			return nil
-		})
+	defer func(db *pebble.DB) {
+		err := db.Close()
 		if err != nil {
-			fmt.Printf("Error during background recompression: %v\n", err)
+			fmt.Printf("Error closing database: %v\n", err)
 		}
-	}()
+	}(db)
+
+	// In background, find .gz files under dataPath and ungzip, then recompress with zstd and save
+	if *doZstdMigration {
+		go func() {
+			err := filepath.Walk(*dataPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if !info.IsDir() && strings.HasSuffix(info.Name(), ".html.gz") {
+					newPath := strings.TrimSuffix(path, ".gz") + ".zst"
+					// read and ungzip
+					file, err := os.Open(path)
+					if err != nil {
+						fmt.Printf("File open error during background recompression for %s: %v\n", path, err)
+						return nil
+					}
+					gz, err := gzip.NewReader(file)
+					if err != nil {
+						_ = file.Close()
+						fmt.Printf("Gzip reader open error during background recompression for %s: %v\n", path, err)
+						return nil
+					}
+					content, err := io.ReadAll(gz)
+					_ = gz.Close()
+					_ = file.Close()
+					if err != nil {
+						fmt.Printf("Read error during background recompression for %s: %v\n", path, err)
+						return nil
+					}
+
+					// recompress with zstd
+					compressedData := gozstd.CompressDict(nil, content, cdict)
+
+					// overwrite file with zstd compressed data
+					err = os.WriteFile(newPath, compressedData, info.Mode())
+					if err != nil {
+						fmt.Printf("File write error during background recompression for %s: %v\n", path, err)
+						return nil
+					}
+					if chtimesErr := os.Chtimes(newPath, info.ModTime(), info.ModTime()); chtimesErr != nil {
+						fmt.Printf("File time preserve error during background recompression for %s: %v\n", path, chtimesErr)
+					}
+					// remove old .gz file
+					err = os.Remove(path)
+					if err != nil {
+						fmt.Printf("File remove error during background recompression for %s: %v\n", path, err)
+						return nil
+					}
+					fmt.Printf("Recompressed %s to %s\n", path, newPath)
+				}
+				return nil
+			})
+			if err != nil {
+				fmt.Printf("Error during background recompression: %v\n", err)
+			}
+		}()
+	}
+
+	if *doPebbleMigration {
+		go func() {
+			err := filepath.Walk(*dataPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+
+				if !info.IsDir() && (strings.HasSuffix(info.Name(), ".html.gz") || strings.HasSuffix(info.Name(), ".html.zst")) {
+					relPath, relErr := filepath.Rel(*dataPath, path)
+					if relErr != nil {
+						return nil
+					}
+					_, getErr := getFileFromPebble(db, relPath)
+					if getErr != nil {
+						// not found in pebble, add it
+						addErr := addFileToPebble(db, info.Name(), relPath, info.ModTime().Unix(), info.Size())
+						if addErr != nil {
+							fmt.Printf("Error adding file to Pebble during migration for %s: %v\n", path, addErr)
+						} else {
+							fmt.Printf("Added file to Pebble during migration: %s\n", path)
+						}
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				fmt.Printf("Error during Pebble migration: %v\n", err)
+			}
+		}()
+	}
 
 	r := gin.Default()
 
@@ -557,7 +407,7 @@ func main() {
 			pageSize = 100_000
 		}
 
-		files, total, err := listFiles(*dataPath, page, pageSize)
+		files, total, err := listFiles(db, page, pageSize)
 		if err != nil {
 			fmt.Printf("Error listing files: %v\n", err)
 			c.JSON(500, gin.H{"error": "Failed to list files"})
@@ -579,6 +429,16 @@ func main() {
 		day := c.Param("day")
 		filename := c.Param("filename")
 
+		// check is archived from pebble db
+		relPath := filepath.Join(year, month, day, filename)
+		meta, err := getFileFromPebble(db, relPath)
+		if err == nil {
+			if meta.IsArchived {
+				c.JSON(410, gin.H{"error": "File is archived"})
+				return
+			}
+		}
+
 		content, err := readFile(*dataPath, year, month, day, filename)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -593,42 +453,6 @@ func main() {
 		c.JSON(200, gin.H{
 			"content": content,
 			"path":    filepath.Join(year, month, day, filename),
-		})
-	})
-
-	r.POST("/files/batch", func(c *gin.Context) {
-		// expecting an array of path strings
-		var paths []string
-		if err := c.BindJSON(&paths); err != nil {
-			c.JSON(400, gin.H{"error": "Invalid JSON"})
-			return
-		}
-
-		type FileContent struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-		}
-
-		var results []FileContent
-
-		for _, path := range paths {
-			parts := strings.SplitN(path, "/", 4)
-			if len(parts) != 4 {
-				continue
-			}
-			year, month, day, filename := parts[0], parts[1], parts[2], parts[3]
-			content, err := readFile(*dataPath, year, month, day, filename)
-			if err != nil {
-				continue
-			}
-			results = append(results, FileContent{
-				path,
-				content,
-			})
-		}
-
-		c.JSON(200, gin.H{
-			"files": results,
 		})
 	})
 
@@ -654,6 +478,11 @@ func main() {
 				fmt.Printf("Error saving HTML: %v\n", err)
 			} else {
 				filePushTotal.Inc()
+
+				err = addFileToPebble(db, path, filepath.Join(filepath.Base(dir), path), json.Timestamp, int64(len(compressedHTML)))
+				if err != nil {
+					fmt.Printf("Error adding file metadata to Pebble after failed save: %v\n", err)
+				}
 			}
 		}()
 
