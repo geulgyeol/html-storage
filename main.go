@@ -488,6 +488,42 @@ func main() {
 		})
 	})
 
+	r.POST("/files/:year/:month/:day/:filename/archive", func(c *gin.Context) {
+		year := c.Param("year")
+		month := c.Param("month")
+		day := c.Param("day")
+		filename := c.Param("filename")
+
+		relPath := filepath.Join(year, month, day, filename)
+		meta, err := getFileFromPebble(db, relPath)
+		if err != nil {
+			c.JSON(404, gin.H{"error": "File not found"})
+			return
+		}
+
+		meta.IsArchived = true
+		valueBytes, err := json.Marshal(meta)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Failed to archive file"})
+			return
+		}
+
+		err = db.Set([]byte(relPath), valueBytes, pebble.Sync)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Failed to archive file"})
+			return
+		}
+
+		// delete the actual file
+		fullPath := filepath.Join(*dataPath, year, month, day, filename)
+		err = os.Remove(fullPath)
+		if err != nil {
+			fmt.Printf("Error deleting archived file: %v\n", err)
+		}
+
+		c.JSON(200, gin.H{"status": "file archived"})
+	})
+
 	r.POST("/:id", func(c *gin.Context) {
 		var json struct {
 			Body      string `json:"body"`
