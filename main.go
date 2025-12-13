@@ -102,12 +102,20 @@ type FileInfo struct {
 var estimatedTotal int64
 var estimatedTotalMutex sync.Mutex
 
-// listFiles returns a paginated list of files in the data directory
-func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
+// listFiles returns a paginated list of files in the data directory using cursor-based pagination
+// cursor is the last key from the previous page (empty string for the first page)
+func listFiles(db *pebble.DB, cursor string, pageSize int) ([]FileInfo, string, int64, error) {
 	var files []FileInfo
-	iter, err := db.NewIter(&pebble.IterOptions{})
+
+	opts := &pebble.IterOptions{}
+	if cursor != "" {
+		// Set lower bound to cursor (exclusive) by appending a null byte
+		opts.LowerBound = append([]byte(cursor), 0)
+	}
+
+	iter, err := db.NewIter(opts)
 	if err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 
 	defer func(iter *pebble.Iterator) {
@@ -117,22 +125,24 @@ func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
 		}
 	}(iter)
 
-	skipped := (page - 1) * pageSize
 	count := 0
+	var nextCursor string
 	for iter.First(); iter.Valid(); iter.Next() {
-		if skipped > 0 {
-			skipped--
-			continue
-		}
-
 		if count >= pageSize {
+			// Set the next cursor to the current key
+			nextCursor = string(iter.Key())
 			break
 		}
 
 		var dbValue FileMetadata
-		err := json.Unmarshal(iter.Value(), &dbValue)
+		value, err := iter.ValueAndErr()
 		if err != nil {
-			return nil, 0, err
+			return nil, "", 0, err
+		}
+
+		err = json.Unmarshal(value, &dbValue)
+		if err != nil {
+			return nil, "", 0, err
 		}
 		files = append(files, FileInfo{
 			Name:      dbValue.Name,
@@ -143,7 +153,7 @@ func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
 		count++
 	}
 
-	return files, estimatedTotal, nil
+	return files, nextCursor, estimatedTotal, nil
 }
 
 // readFile reads and decompresses a stored HTML file
@@ -263,7 +273,7 @@ func main() {
 	parser := argparse.NewParser("geulgyeol-html-storage", "A HTML storage server for Geulgyeol.")
 
 	port := parser.Int("p", "port", &argparse.Options{Default: 8080, Help: "Port to run the server on"})
-	dataPath := parser.String("d", "data-path", &argparse.Options{Default: "/data", Help: "Path to store HTML files"})
+	dataPathArg := parser.String("d", "data-path", &argparse.Options{Default: "/data", Help: "Path to store HTML files"})
 	zstdDictionaryPath := parser.String("z", "zstd-dictionary", &argparse.Options{Default: "./zstd_dict", Help: "Path to Zstd dictionary file"})
 	doZstdMigration := parser.Flag("", "do-zstd-migration", &argparse.Options{Help: "Perform background migration from Gzip to Zstd compression", Default: false})
 	doPebbleMigration := parser.Flag("", "do-pebble-migration", &argparse.Options{Help: "Perform background migration to Pebble DB storage", Default: false})
@@ -271,6 +281,12 @@ func main() {
 	err := parser.Parse(os.Args)
 	if err != nil {
 		panic(err)
+	}
+
+	dataPath, err := filepath.Abs(*dataPathArg)
+
+	if err != nil {
+		panic(fmt.Sprintf("Failed to get absolute path of data directory: %v", err))
 	}
 
 	// Load Zstd dictionary
@@ -289,8 +305,11 @@ func main() {
 	}
 
 	// load pebble db for metadata
-	pebblePath := filepath.Join(*dataPath, "pebble_db")
-	os.MkdirAll(pebblePath, os.ModePerm)
+	pebblePath := filepath.Join(dataPath, "pebble_db")
+	err = os.MkdirAll(pebblePath, os.ModePerm)
+	if err != nil {
+		panic(err)
+	}
 	db, err := pebble.Open(pebblePath, &pebble.Options{})
 	if err != nil {
 		panic(err)
@@ -306,7 +325,7 @@ func main() {
 	// In background, find .gz files under dataPath and ungzip, then recompress with zstd and save
 	if *doZstdMigration {
 		go func() {
-			err := filepath.Walk(*dataPath, func(path string, info os.FileInfo, err error) error {
+			err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
 				}
@@ -362,13 +381,15 @@ func main() {
 
 	if *doPebbleMigration {
 		go func() {
-			err := filepath.Walk(*dataPath, func(path string, info os.FileInfo, err error) error {
+			dataPathParent := filepath.Dir(dataPath)
+
+			err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
 				}
 
 				if !info.IsDir() && (strings.HasSuffix(info.Name(), ".html.gz") || strings.HasSuffix(info.Name(), ".html.zst")) {
-					relPath, relErr := filepath.Rel(*dataPath, path)
+					relPath, relErr := filepath.Rel(dataPathParent, path)
 					if relErr != nil {
 						return nil
 					}
@@ -429,12 +450,9 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// List files endpoint with pagination
+	// List files endpoint with cursor-based pagination
 	r.GET("/files", func(c *gin.Context) {
-		page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
-		if err != nil || page < 1 {
-			page = 1
-		}
+		cursor := c.DefaultQuery("cursor", "")
 
 		pageSize, err := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 		if err != nil || pageSize < 1 {
@@ -444,7 +462,7 @@ func main() {
 			pageSize = 100_000
 		}
 
-		files, total, err := listFiles(db, page, pageSize)
+		files, nextCursor, total, err := listFiles(db, cursor, pageSize)
 		if err != nil {
 			fmt.Printf("Error listing files: %v\n", err)
 			c.JSON(500, gin.H{"error": "Failed to list files"})
@@ -452,10 +470,10 @@ func main() {
 		}
 
 		c.JSON(200, gin.H{
-			"files":    files,
-			"total":    total,
-			"page":     page,
-			"pageSize": pageSize,
+			"files":      files,
+			"total":      total,
+			"nextCursor": nextCursor,
+			"pageSize":   pageSize,
 		})
 	})
 
@@ -476,7 +494,7 @@ func main() {
 			}
 		}
 
-		content, err := readFile(*dataPath, year, month, day, filename)
+		content, err := readFile(dataPath, year, month, day, filename)
 		if err != nil {
 			if os.IsNotExist(err) {
 				c.JSON(404, gin.H{"error": "File not found"})
@@ -520,7 +538,7 @@ func main() {
 		}
 
 		// delete the actual file
-		fullPath := filepath.Join(*dataPath, year, month, day, filename)
+		fullPath := filepath.Join(dataPath, year, month, day, filename)
 		err = os.Remove(fullPath)
 		if err != nil {
 			fmt.Printf("Error deleting archived file: %v\n", err)
@@ -530,21 +548,21 @@ func main() {
 	})
 
 	r.POST("/:id", func(c *gin.Context) {
-		var json struct {
+		var body struct {
 			Body      string `json:"body"`
 			Blog      string `json:"blog"`
 			Timestamp int64  `json:"timestamp"`
 		}
 
-		if err := c.BindJSON(&json); err != nil {
+		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, gin.H{"error": "Invalid JSON"})
 			return
 		}
 
 		go func() {
-			compressedHTML := compressHTML(json.Body)
-			dir := getDir(*dataPath, json.Timestamp)
-			path := getFilename(c.Param("id"), json.Blog)
+			compressedHTML := compressHTML(body.Body)
+			dir := getDir(dataPath, body.Timestamp)
+			path := getFilename(c.Param("id"), body.Blog)
 
 			err := saveHTML(dir, path, compressedHTML)
 			if err != nil {
@@ -555,7 +573,7 @@ func main() {
 				estimatedTotal++
 				estimatedTotalMutex.Unlock()
 
-				err = addFileToPebble(db, path, filepath.Join(filepath.Base(dir), path), json.Timestamp, int64(len(compressedHTML)))
+				err = addFileToPebble(db, path, filepath.Join(dir, path), body.Timestamp, int64(len(compressedHTML)))
 				if err != nil {
 					fmt.Printf("Error adding file metadata to Pebble after failed save: %v\n", err)
 				}
