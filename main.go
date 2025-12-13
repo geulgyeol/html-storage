@@ -112,18 +112,22 @@ func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
 		}
 	}(iter)
 
-	total := db.Metrics().Compact.Count
+	total := int64(0)
 
 	skipped := (page - 1) * pageSize
 	count := 0
 	for iter.First(); iter.Valid(); iter.Next() {
+		total++
+
 		if skipped > 0 {
 			skipped--
 			continue
 		}
+
 		if count >= pageSize {
-			break
+			continue // for counting total
 		}
+
 		var dbValue FileMetadata
 		err := json.Unmarshal(iter.Value(), &dbValue)
 		if err != nil {
