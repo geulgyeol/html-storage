@@ -242,7 +242,12 @@ func getFileFromPebble(db *pebble.DB, filePath string) (FileMetadata, error) {
 	if err != nil {
 		return FileMetadata{}, err
 	}
-	_ = closer.Close()
+	defer func(closer io.Closer) {
+		err := closer.Close()
+		if err != nil {
+			fmt.Printf("Error closing pebble value: %v\n", err)
+		}
+	}(closer)
 
 	var dbValue FileMetadata
 	err = json.Unmarshal(valueBytes, &dbValue)
