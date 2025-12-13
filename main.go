@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -156,29 +158,29 @@ func listFiles(db *pebble.DB, cursor string, pageSize int) ([]FileInfo, string, 
 	return files, nextCursor, estimatedTotal, nil
 }
 
-// readFile reads and decompresses a stored HTML file
-func readFile(dataPath, year, month, day, filename string) (string, error) {
+// readFile reads a raw compressed HTML file
+func readFile(dataPath, year, month, day, filename string) ([]byte, error) {
 	filePath := filepath.Join(dataPath, year, month, day, filename)
 
 	// Validate path to prevent directory traversal
 	absDataPath, err := filepath.Abs(dataPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	absFilePath, err := filepath.Abs(filePath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// Clean paths and add separator suffix to ensure proper prefix matching
 	cleanDataPath := filepath.Clean(absDataPath) + string(filepath.Separator)
 	cleanFilePath := filepath.Clean(absFilePath)
 	if !strings.HasPrefix(cleanFilePath, cleanDataPath) {
-		return "", fmt.Errorf("invalid file path")
+		return nil, fmt.Errorf("invalid file path")
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer func(file *os.File) {
 		err := file.Close()
@@ -187,18 +189,23 @@ func readFile(dataPath, year, month, day, filename string) (string, error) {
 		}
 	}(file)
 
+	compressedData, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+
+	return compressedData, nil
+}
+
+func decompressHTML(filename string, compressedData []byte) (string, error) {
 	if strings.HasSuffix(filename, ".zst") {
-		compressedData, err := io.ReadAll(file)
-		if err != nil {
-			return "", err
-		}
 		decompressedData, err := gozstd.DecompressDict(nil, compressedData, ddict)
 		if err != nil {
 			return "", err
 		}
 		return string(decompressedData), nil
 	} else if strings.HasSuffix(filename, ".html.gz") {
-		gz, err := gzip.NewReader(file)
+		gz, err := gzip.NewReader(bytes.NewReader(compressedData))
 		if err != nil {
 			return "", err
 		}
@@ -505,8 +512,25 @@ func main() {
 			return
 		}
 
+		doDecompress := c.DefaultQuery("decompress", "true")
+		if doDecompress == "true" {
+			decompressedContent, err := decompressHTML(filename, content)
+			if err != nil {
+				fmt.Printf("Error decompressing file: %v\n", err)
+				c.JSON(500, gin.H{"error": "Failed to decompress file"})
+				return
+			}
+			c.JSON(200, gin.H{
+				"content": decompressedContent,
+				"path":    filepath.Join(year, month, day, filename),
+			})
+			return
+		}
+
+		// return raw compressed content as base64
+		encodedContent := base64.StdEncoding.EncodeToString(content)
 		c.JSON(200, gin.H{
-			"content": content,
+			"content": encodedContent,
 			"path":    filepath.Join(year, month, day, filename),
 		})
 	})
