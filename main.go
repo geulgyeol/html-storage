@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akamensky/argparse"
@@ -97,6 +98,10 @@ type FileInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+// atomic total
+var estimatedTotal int64
+var estimatedTotalMutex sync.Mutex
+
 // listFiles returns a paginated list of files in the data directory
 func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
 	var files []FileInfo
@@ -112,20 +117,16 @@ func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
 		}
 	}(iter)
 
-	total := int64(0)
-
 	skipped := (page - 1) * pageSize
 	count := 0
 	for iter.First(); iter.Valid(); iter.Next() {
-		total++
-
 		if skipped > 0 {
 			skipped--
 			continue
 		}
 
 		if count >= pageSize {
-			continue // for counting total
+			break
 		}
 
 		var dbValue FileMetadata
@@ -142,7 +143,7 @@ func listFiles(db *pebble.DB, page, pageSize int) ([]FileInfo, int64, error) {
 		count++
 	}
 
-	return files, total, nil
+	return files, estimatedTotal, nil
 }
 
 // readFile reads and decompresses a stored HTML file
@@ -370,6 +371,9 @@ func main() {
 					if getErr != nil {
 						// not found in pebble, add it
 						addErr := addFileToPebble(db, info.Name(), relPath, info.ModTime().Unix(), info.Size())
+						estimatedTotalMutex.Lock()
+						estimatedTotal++
+						estimatedTotalMutex.Unlock()
 						if addErr != nil {
 							fmt.Printf("Error adding file to Pebble during migration for %s: %v\n", path, addErr)
 						} else {
@@ -384,6 +388,29 @@ func main() {
 			}
 		}()
 	}
+
+	// every 10 minutes, update estimated total from pebble db
+	go func() {
+		for {
+			time.Sleep(10 * time.Minute)
+			var count int64 = 0
+			iter, err := db.NewIter(&pebble.IterOptions{})
+			if err != nil {
+				fmt.Printf("Error creating iterator for total count update: %v\n", err)
+				continue
+			}
+			for iter.First(); iter.Valid(); iter.Next() {
+				count++
+			}
+			err = iter.Close()
+			if err != nil {
+				fmt.Printf("Error closing iterator for total count update: %v\n", err)
+			}
+			estimatedTotalMutex.Lock()
+			estimatedTotal = count
+			estimatedTotalMutex.Unlock()
+		}
+	}()
 
 	r := gin.Default()
 
@@ -482,6 +509,9 @@ func main() {
 				fmt.Printf("Error saving HTML: %v\n", err)
 			} else {
 				filePushTotal.Inc()
+				estimatedTotalMutex.Lock()
+				estimatedTotal++
+				estimatedTotalMutex.Unlock()
 
 				err = addFileToPebble(db, path, filepath.Join(filepath.Base(dir), path), json.Timestamp, int64(len(compressedHTML)))
 				if err != nil {
