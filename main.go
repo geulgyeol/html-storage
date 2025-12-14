@@ -285,6 +285,7 @@ func main() {
 	zstdDictionaryPath := parser.String("z", "zstd-dictionary", &argparse.Options{Default: "./zstd_dict", Help: "Path to Zstd dictionary file"})
 	doZstdMigration := parser.Flag("", "do-zstd-migration", &argparse.Options{Help: "Perform background migration from Gzip to Zstd compression", Default: false})
 	doPebbleMigration := parser.Flag("", "do-pebble-migration", &argparse.Options{Help: "Perform background migration to Pebble DB storage", Default: false})
+	cleanArchivedFiles := parser.Flag("", "clean-archived-files", &argparse.Options{Help: "Clean up archived files to DB", Default: false})
 
 	err := parser.Parse(os.Args)
 	if err != nil {
@@ -419,6 +420,40 @@ func main() {
 			if err != nil {
 				fmt.Printf("Error during Pebble migration: %v\n", err)
 			}
+		}()
+	}
+
+	if *cleanArchivedFiles {
+		go func() {
+			// iter db
+			iter, err := db.NewIter(&pebble.IterOptions{})
+			if err != nil {
+				fmt.Printf("Error creating iterator for cleaning archived files: %v\n", err)
+				return
+			}
+			for iter.First(); iter.Valid(); iter.Next() {
+				var dbValue FileMetadata
+				value, err := iter.ValueAndErr()
+				if err != nil {
+					fmt.Printf("Error getting value during cleaning archived files: %v\n", err)
+					continue
+				}
+				err = json.Unmarshal(value, &dbValue)
+				if err != nil {
+					fmt.Printf("Error unmarshaling value during cleaning archived files: %v\n", err)
+					continue
+				}
+				if dbValue.IsArchived {
+					// delete metadata entry
+					err = db.Delete([]byte(dbValue.Path), pebble.Sync)
+					if err != nil {
+						fmt.Printf("Error deleting metadata during cleaning archived files for %s: %v\n", dbValue.Path, err)
+						continue
+					}
+					fmt.Printf("Deleted archived file metadata from DB: %s\n", dbValue.Path)
+				}
+			}
+			err = iter.Close()
 		}()
 	}
 
