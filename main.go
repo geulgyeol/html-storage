@@ -254,6 +254,7 @@ func addFileToPebble(db *pebble.DB, name, filePath string, timestamp, size int64
 }
 
 func getFileFromPebble(db *pebble.DB, filePath string) (FileMetadata, error) {
+	fmt.Printf("%s", filePath)
 	dbKey := []byte(filePath)
 	valueBytes, closer, err := db.Get(dbKey)
 	if err != nil {
@@ -291,6 +292,7 @@ func main() {
 	}
 
 	dataPath, err := filepath.Abs(*dataPathArg)
+	dataPathParent := filepath.Dir(dataPath)
 
 	if err != nil {
 		panic(fmt.Sprintf("Failed to get absolute path of data directory: %v", err))
@@ -388,8 +390,6 @@ func main() {
 
 	if *doPebbleMigration {
 		go func() {
-			dataPathParent := filepath.Dir(dataPath)
-
 			err := filepath.Walk(dataPath, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
@@ -492,13 +492,17 @@ func main() {
 		filename := c.Param("filename")
 
 		// check is archived from pebble db
-		relPath := filepath.Join(year, month, day, filename)
+		path := filepath.Join(dataPath, year, month, day, filename)
+		relPath, _ := filepath.Rel(dataPathParent, path)
 		meta, err := getFileFromPebble(db, relPath)
 		if err == nil {
 			if meta.IsArchived {
 				c.JSON(410, gin.H{"error": "File is archived"})
 				return
 			}
+		} else {
+			c.JSON(404, gin.H{"error": "File metadata not found"})
+			return
 		}
 
 		content, err := readFile(dataPath, year, month, day, filename)
@@ -541,7 +545,8 @@ func main() {
 		day := c.Param("day")
 		filename := c.Param("filename")
 
-		relPath := filepath.Join(year, month, day, filename)
+		path := filepath.Join(dataPath, year, month, day, filename)
+		relPath, _ := filepath.Rel(dataPathParent, path)
 		meta, err := getFileFromPebble(db, relPath)
 		if err != nil {
 			c.JSON(404, gin.H{"error": "File not found"})
