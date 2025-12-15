@@ -254,7 +254,7 @@ func addFileToPebble(db *pebble.DB, name, filePath string, timestamp, size int64
 }
 
 func getFileFromPebble(db *pebble.DB, filePath string) (FileMetadata, error) {
-	fmt.Printf("%s", filePath)
+	// fmt.Printf("%s", filePath)
 	dbKey := []byte(filePath)
 	valueBytes, closer, err := db.Get(dbKey)
 	if err != nil {
