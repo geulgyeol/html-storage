@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akamensky/argparse"
@@ -67,10 +69,17 @@ func getFilename(url string, blog string) string {
 	return fmt.Sprintf("%s_%s.html.zst", blog, url)
 }
 
+// dirCache caches known directories to avoid repeated MkdirAll calls
+var dirCache sync.Map
+
 func saveHTML(dir string, path string, compressedHTML []byte) error {
-	err := os.MkdirAll(dir, os.ModePerm)
-	if err != nil {
-		return err
+	// Check cache before calling MkdirAll
+	if _, exists := dirCache.Load(dir); !exists {
+		err := os.MkdirAll(dir, os.ModePerm)
+		if err != nil {
+			return err
+		}
+		dirCache.Store(dir, struct{}{})
 	}
 
 	fullPath := filepath.Join(dir, path)
@@ -85,12 +94,14 @@ func saveHTML(dir string, path string, compressedHTML []byte) error {
 		}
 	}(file)
 
-	_, err = file.Write(compressedHTML)
+	// Use buffered writer for better write performance
+	writer := bufio.NewWriterSize(file, 16*1024) // 16KB buffer
+	_, err = writer.Write(compressedHTML)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return writer.Flush()
 }
 
 type FileInfo struct {
@@ -100,9 +111,8 @@ type FileInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// atomic total
+// atomic total - use atomic operations for lock-free updates
 var estimatedTotal int64
-var estimatedTotalMutex sync.Mutex
 
 // listFiles returns a paginated list of files in the data directory using cursor-based pagination
 // cursor is the last key from the previous page (empty string for the first page)
@@ -155,7 +165,7 @@ func listFiles(db *pebble.DB, cursor string, pageSize int) ([]FileInfo, string, 
 		count++
 	}
 
-	return files, nextCursor, estimatedTotal, nil
+	return files, nextCursor, atomic.LoadInt64(&estimatedTotal), nil
 }
 
 // readFile reads a raw compressed HTML file
@@ -250,7 +260,8 @@ func addFileToPebble(db *pebble.DB, name, filePath string, timestamp, size int64
 		return err
 	}
 
-	return db.Set(dbKey, valueBytes, pebble.Sync)
+	// Use NoSync for better write throughput - Pebble will batch syncs
+	return db.Set(dbKey, valueBytes, pebble.NoSync)
 }
 
 func getFileFromPebble(db *pebble.DB, filePath string) (FileMetadata, error) {
@@ -405,9 +416,7 @@ func main() {
 					if getErr != nil {
 						// not found in pebble, add it
 						addErr := addFileToPebble(db, info.Name(), relPath, info.ModTime().Unix(), info.Size())
-						estimatedTotalMutex.Lock()
-						estimatedTotal++
-						estimatedTotalMutex.Unlock()
+						atomic.AddInt64(&estimatedTotal, 1)
 						if addErr != nil {
 							fmt.Printf("Error adding file to Pebble during migration for %s: %v\n", path, addErr)
 						} else {
@@ -473,9 +482,7 @@ func main() {
 			if err != nil {
 				fmt.Printf("Error closing iterator for total count update: %v\n", err)
 			}
-			estimatedTotalMutex.Lock()
-			estimatedTotal = count
-			estimatedTotalMutex.Unlock()
+			atomic.StoreInt64(&estimatedTotal, count)
 
 			time.Sleep(10 * time.Minute)
 		}
@@ -633,9 +640,7 @@ func main() {
 				fmt.Printf("Error saving HTML: %v\n", err)
 			} else {
 				filePushTotal.Inc()
-				estimatedTotalMutex.Lock()
-				estimatedTotal++
-				estimatedTotalMutex.Unlock()
+				atomic.AddInt64(&estimatedTotal, 1)
 
 				err = addFileToPebble(db, path, filepath.Join(dir, path), body.Timestamp, int64(len(compressedHTML)))
 				if err != nil {
