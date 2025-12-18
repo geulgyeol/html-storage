@@ -32,6 +32,22 @@ var (
 	})
 )
 
+var (
+	fileWriteDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "html_storage_file_write_duration_seconds",
+		Help:    "Duration of file write operations",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	})
+)
+
+var (
+	fileQueuingDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "html_storage_file_queuing_duration_seconds",
+		Help:    "Duration of file queuing operations",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	})
+)
+
 var cdict *gozstd.CDict
 var ddict *gozstd.DDict
 
@@ -48,7 +64,7 @@ var writeQueue chan writeJob
 
 // workerPool manages concurrent file writers
 const numWorkers = 8
-const queueSize = 10000
+const queueSize = 1000
 
 func compressHTML(html string) []byte {
 	//var buf bytes.Buffer
@@ -136,6 +152,10 @@ func startWorkers(db *pebble.DB, dataPath string) {
 	for i := 0; i < numWorkers; i++ {
 		go func(workerID int) {
 			for job := range writeQueue {
+				start := time.Now()
+				defer func() {
+					fileWriteDuration.Observe(time.Since(start).Seconds())
+				}()
 				compressedHTML := compressHTML(job.html)
 				err := saveHTML(job.dir, job.path, compressedHTML)
 				if err != nil {
@@ -663,6 +683,10 @@ func main() {
 	})
 
 	r.POST("/:id", func(c *gin.Context) {
+		start := time.Now()
+		defer func() {
+			fileQueuingDuration.Observe(time.Since(start).Seconds())
+		}()
 		var body struct {
 			Body      string `json:"body"`
 			Blog      string `json:"blog"`
