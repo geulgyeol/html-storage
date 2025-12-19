@@ -33,42 +33,37 @@ var (
 )
 
 var (
-	fileWriteDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "html_storage_file_write_duration_seconds",
-		Help:    "Duration of file write operations",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	fileWriteDuration = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "html_storage_file_write_duration_seconds",
+		Help: "Duration of file write operations",
 	})
 )
 
 var (
-	fileQueuingDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "html_storage_file_queuing_duration_seconds",
-		Help:    "Duration of file queuing operations",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	fileQueuingDuration = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "html_storage_file_queuing_duration_seconds",
+		Help: "Duration of file queuing operations",
 	})
 )
 
 var (
-	fileCompressionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "html_storage_file_compression_duration_seconds",
-		Help:    "Duration of file compression operations",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	fileCompressionDuration = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "html_storage_file_compression_duration_seconds",
+		Help: "Duration of file compression operations",
 	})
 )
 
 var (
-	fileAddToPebbleDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "html_storage_file_add_to_pebble_duration_seconds",
-		Help:    "Duration of adding file metadata to Pebble DB",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	fileAddToPebbleDuration = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "html_storage_file_add_to_pebble_duration_seconds",
+		Help: "Duration of adding file metadata to Pebble DB",
 	})
 )
 
 var (
-	fileSaveDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "html_storage_file_save_duration_seconds",
-		Help:    "Duration of file save operations",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	fileSaveDuration = promauto.NewSummary(prometheus.SummaryOpts{
+		Name: "html_storage_file_save_duration_seconds",
+		Help: "Duration of file save operations",
 	})
 )
 
