@@ -34,36 +34,41 @@ var (
 
 var (
 	fileWriteDuration = promauto.NewSummary(prometheus.SummaryOpts{
-		Name: "html_storage_file_write_duration_seconds",
-		Help: "Duration of file write operations",
+		Name:       "html_storage_file_write_duration_seconds",
+		Help:       "Duration of file write operations",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	})
 )
 
 var (
 	fileQueuingDuration = promauto.NewSummary(prometheus.SummaryOpts{
-		Name: "html_storage_file_queuing_duration_seconds",
-		Help: "Duration of file queuing operations",
+		Name:       "html_storage_file_queuing_duration_seconds",
+		Help:       "Duration of file queuing operations",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	})
 )
 
 var (
 	fileCompressionDuration = promauto.NewSummary(prometheus.SummaryOpts{
-		Name: "html_storage_file_compression_duration_seconds",
-		Help: "Duration of file compression operations",
+		Name:       "html_storage_file_compression_duration_seconds",
+		Help:       "Duration of file compression operations",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	})
 )
 
 var (
 	fileAddToPebbleDuration = promauto.NewSummary(prometheus.SummaryOpts{
-		Name: "html_storage_file_add_to_pebble_duration_seconds",
-		Help: "Duration of adding file metadata to Pebble DB",
+		Name:       "html_storage_file_add_to_pebble_duration_seconds",
+		Help:       "Duration of adding file metadata to Pebble DB",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	})
 )
 
 var (
 	fileSaveDuration = promauto.NewSummary(prometheus.SummaryOpts{
-		Name: "html_storage_file_save_duration_seconds",
-		Help: "Duration of file save operations",
+		Name:       "html_storage_file_save_duration_seconds",
+		Help:       "Duration of file save operations",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 	})
 )
 
