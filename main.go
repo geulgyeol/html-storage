@@ -75,21 +75,6 @@ var (
 var cdict *gozstd.CDict
 var ddict *gozstd.DDict
 
-// writeJob represents a file write operation
-type writeJob struct {
-	dir       string
-	path      string
-	html      string
-	timestamp int64
-}
-
-// writeQueue is a buffered channel for write jobs
-var writeQueue chan writeJob
-
-// workerPool manages concurrent file writers
-const numWorkers = 16
-const queueSize = 4096
-
 func compressHTML(html string) []byte {
 	//var buf bytes.Buffer
 	//gz := gzip.NewWriter(&buf)
@@ -178,36 +163,6 @@ type FileInfo struct {
 
 // atomic total - use atomic operations for lock-free updates
 var estimatedTotal int64
-
-// startWorkers launches the worker pool for processing write jobs
-func startWorkers(db *pebble.DB, dataPath string) {
-	writeQueue = make(chan writeJob, queueSize)
-
-	for i := 0; i < numWorkers; i++ {
-		go func(workerID int) {
-			for job := range writeQueue {
-				start := time.Now()
-
-				compressedHTML := compressHTML(job.html)
-				err := saveHTML(job.dir, job.path, compressedHTML)
-				if err != nil {
-					fmt.Printf("Worker %d: Error saving HTML: %v\n", workerID, err)
-					continue
-				}
-
-				filePushTotal.Inc()
-				atomic.AddInt64(&estimatedTotal, 1)
-
-				err = addFileToPebble(db, job.path, filepath.Join(job.dir, job.path), job.timestamp, int64(len(compressedHTML)))
-				if err != nil {
-					fmt.Printf("Worker %d: Error adding file metadata to Pebble: %v\n", workerID, err)
-				}
-
-				fileWriteDuration.Observe(time.Since(start).Seconds())
-			}
-		}(i)
-	}
-}
 
 // listFiles returns a paginated list of files in the data directory using cursor-based pagination
 // cursor is the last key from the previous page (empty string for the first page)
@@ -442,9 +397,6 @@ func main() {
 			fmt.Printf("Error closing database: %v\n", err)
 		}
 	}(db)
-
-	// Start worker pool for handling write requests
-	startWorkers(db, dataPath)
 
 	// In background, find .gz files under dataPath and ungzip, then recompress with zstd and save
 	if *doZstdMigration {
@@ -722,10 +674,6 @@ func main() {
 	})
 
 	r.POST("/:id", func(c *gin.Context) {
-		start := time.Now()
-		defer func() {
-			fileQueuingDuration.Observe(time.Since(start).Seconds())
-		}()
 		var body struct {
 			Body      string `json:"body"`
 			Blog      string `json:"blog"`
@@ -737,15 +685,30 @@ func main() {
 			return
 		}
 
-		job := writeJob{
-			dir:       getDir(dataPath, body.Timestamp),
-			path:      getFilename(c.Param("id"), body.Blog),
-			html:      body.Body,
-			timestamp: body.Timestamp,
-		}
+		go func() {
+			start := time.Now()
 
-		// Fire-and-forget: queue job and return immediately
-		writeQueue <- job
+			compressedHTML := compressHTML(body.Body)
+			dir := getDir(dataPath, body.Timestamp)
+			path := getFilename(c.Param("id"), body.Blog)
+
+			err := saveHTML(dir, path, compressedHTML)
+			if err != nil {
+				fmt.Printf("Error saving HTML: %v\n", err)
+				return
+			}
+
+			filePushTotal.Inc()
+			atomic.AddInt64(&estimatedTotal, 1)
+
+			err = addFileToPebble(db, path, filepath.Join(dir, path), body.Timestamp, int64(len(compressedHTML)))
+			if err != nil {
+				fmt.Printf("Error adding file metadata to Pebble: %v\n", err)
+			}
+
+			fileWriteDuration.Observe(time.Since(start).Seconds())
+		}()
+
 		c.JSON(200, gin.H{"status": "success"})
 	})
 
