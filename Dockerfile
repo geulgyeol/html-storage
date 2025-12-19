@@ -1,5 +1,5 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM ubuntu/go:1.24-25.04_edge AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-rc-trixie AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
