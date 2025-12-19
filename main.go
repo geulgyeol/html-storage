@@ -685,29 +685,30 @@ func main() {
 			return
 		}
 
-		go func() {
-			start := time.Now()
+		start := time.Now()
 
-			compressedHTML := compressHTML(body.Body)
-			dir := getDir(dataPath, body.Timestamp)
-			path := getFilename(c.Param("id"), body.Blog)
+		compressedHTML := compressHTML(body.Body)
+		dir := getDir(dataPath, body.Timestamp)
+		path := getFilename(c.Param("id"), body.Blog)
 
-			err := saveHTML(dir, path, compressedHTML)
-			if err != nil {
-				fmt.Printf("Error saving HTML: %v\n", err)
-				return
-			}
+		err := saveHTML(dir, path, compressedHTML)
+		if err != nil {
+			fmt.Printf("Error saving HTML: %v\n", err)
+			c.JSON(500, gin.H{"error": "Failed to save HTML"})
+			return
+		}
 
-			filePushTotal.Inc()
-			atomic.AddInt64(&estimatedTotal, 1)
+		filePushTotal.Inc()
+		atomic.AddInt64(&estimatedTotal, 1)
 
-			err = addFileToPebble(db, path, filepath.Join(dir, path), body.Timestamp, int64(len(compressedHTML)))
-			if err != nil {
-				fmt.Printf("Error adding file metadata to Pebble: %v\n", err)
-			}
+		err = addFileToPebble(db, path, filepath.Join(dir, path), body.Timestamp, int64(len(compressedHTML)))
+		if err != nil {
+			fmt.Printf("Error adding file metadata to Pebble: %v\n", err)
+			c.JSON(500, gin.H{"error": "Failed to add file metadata"})
+			return
+		}
 
-			fileWriteDuration.Observe(time.Since(start).Seconds())
-		}()
+		fileWriteDuration.Observe(time.Since(start).Seconds())
 
 		c.JSON(200, gin.H{"status": "success"})
 	})
