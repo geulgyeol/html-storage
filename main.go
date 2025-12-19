@@ -48,6 +48,30 @@ var (
 	})
 )
 
+var (
+	fileCompressionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "html_storage_file_compression_duration_seconds",
+		Help:    "Duration of file compression operations",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	})
+)
+
+var (
+	fileAddToPebbleDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "html_storage_file_add_to_pebble_duration_seconds",
+		Help:    "Duration of adding file metadata to Pebble DB",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	})
+)
+
+var (
+	fileSaveDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "html_storage_file_save_duration_seconds",
+		Help:    "Duration of file save operations",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // from 1ms to ~16s
+	})
+)
+
 var cdict *gozstd.CDict
 var ddict *gozstd.DDict
 
@@ -63,7 +87,7 @@ type writeJob struct {
 var writeQueue chan writeJob
 
 // workerPool manages concurrent file writers
-const numWorkers = 8
+const numWorkers = 16
 const queueSize = 1000
 
 func compressHTML(html string) []byte {
@@ -71,6 +95,11 @@ func compressHTML(html string) []byte {
 	//gz := gzip.NewWriter(&buf)
 	//_, _ = gz.Write([]byte(html))
 	//_ = gz.Close()
+
+	start := time.Now()
+	defer func() {
+		fileCompressionDuration.Observe(time.Since(start).Seconds())
+	}()
 
 	compressedData := gozstd.CompressDict(nil, []byte(html), cdict)
 
@@ -104,6 +133,11 @@ func getFilename(url string, blog string) string {
 var dirCache sync.Map
 
 func saveHTML(dir string, path string, compressedHTML []byte) error {
+	start := time.Now()
+	defer func() {
+		fileSaveDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	// Check cache before calling MkdirAll
 	if _, exists := dirCache.Load(dir); !exists {
 		err := os.MkdirAll(dir, os.ModePerm)
@@ -153,9 +187,7 @@ func startWorkers(db *pebble.DB, dataPath string) {
 		go func(workerID int) {
 			for job := range writeQueue {
 				start := time.Now()
-				defer func() {
-					fileWriteDuration.Observe(time.Since(start).Seconds())
-				}()
+
 				compressedHTML := compressHTML(job.html)
 				err := saveHTML(job.dir, job.path, compressedHTML)
 				if err != nil {
@@ -170,6 +202,8 @@ func startWorkers(db *pebble.DB, dataPath string) {
 				if err != nil {
 					fmt.Printf("Worker %d: Error adding file metadata to Pebble: %v\n", workerID, err)
 				}
+
+				fileWriteDuration.Observe(time.Since(start).Seconds())
 			}
 		}(i)
 	}
@@ -307,6 +341,11 @@ type FileMetadata struct {
 }
 
 func addFileToPebble(db *pebble.DB, name, filePath string, timestamp, size int64) error {
+	start := time.Now()
+	defer func() {
+		fileAddToPebbleDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	dbKey := []byte(filePath)
 	dbValue := FileMetadata{
 		Name:       name,
