@@ -416,7 +416,7 @@ func main() {
 		panic(fmt.Sprintf("Failed to read Zstd dictionary: %v", err))
 	}
 
-	cdict, err = gozstd.NewCDictLevel(dictData, 9)
+	cdict, err = gozstd.NewCDictLevel(dictData, 5)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create Zstd dictionary: %v", err))
 	}
