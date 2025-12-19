@@ -713,6 +713,51 @@ func main() {
 		c.JSON(200, gin.H{"status": "success"})
 	})
 
+	r.POST("/batch", func(c *gin.Context) {
+		var body map[string]struct {
+			Body      string `json:"body"`
+			Blog      string `json:"blog"`
+			Timestamp int64  `json:"timestamp"`
+		}
+
+		if err := c.BindJSON(&body); err != nil {
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
+			return
+		}
+
+		for id, fileData := range body {
+			go func(id string, fileData struct {
+				Body      string `json:"body"`
+				Blog      string `json:"blog"`
+				Timestamp int64  `json:"timestamp"`
+			}) {
+				start := time.Now()
+
+				compressedHTML := compressHTML(fileData.Body)
+				dir := getDir(dataPath, fileData.Timestamp)
+				path := getFilename(id, fileData.Blog)
+
+				err := saveHTML(dir, path, compressedHTML)
+				if err != nil {
+					fmt.Printf("Error saving HTML in batch for id %s: %v\n", id, err)
+					return
+				}
+
+				filePushTotal.Inc()
+				atomic.AddInt64(&estimatedTotal, 1)
+
+				err = addFileToPebble(db, path, filepath.Join(dir, path), fileData.Timestamp, int64(len(compressedHTML)))
+				if err != nil {
+					fmt.Printf("Error adding file metadata to Pebble in batch for id %s: %v\n", id, err)
+				}
+
+				fileWriteDuration.Observe(time.Since(start).Seconds())
+			}(id, fileData)
+		}
+
+		c.JSON(200, gin.H{"status": "success"})
+	})
+
 	fmt.Printf("Starting server on port %d\n", *port)
 
 	// run the server
