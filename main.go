@@ -88,7 +88,7 @@ var writeQueue chan writeJob
 
 // workerPool manages concurrent file writers
 const numWorkers = 16
-const queueSize = 1000
+const queueSize = 4096
 
 func compressHTML(html string) []byte {
 	//var buf bytes.Buffer
