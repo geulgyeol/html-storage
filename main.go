@@ -359,8 +359,6 @@ func main() {
 	}
 
 	dataPath, err := filepath.Abs(*dataPathArg)
-	dataPathParent := filepath.Dir(dataPath)
-
 	if err != nil {
 		panic(fmt.Sprintf("Failed to get absolute path of data directory: %v", err))
 	}
@@ -463,14 +461,11 @@ func main() {
 				}
 
 				if !info.IsDir() && (strings.HasSuffix(info.Name(), ".html.gz") || strings.HasSuffix(info.Name(), ".html.zst")) {
-					relPath, relErr := filepath.Rel(dataPathParent, path)
-					if relErr != nil {
-						return nil
-					}
-					_, getErr := getFileFromPebble(db, relPath)
+					// Use absolute path as key (path from Walk is already absolute)
+					_, getErr := getFileFromPebble(db, path)
 					if getErr != nil {
 						// not found in pebble, add it
-						addErr := addFileToPebble(db, info.Name(), relPath, info.ModTime().Unix(), info.Size())
+						addErr := addFileToPebble(db, info.Name(), path, info.ModTime().Unix(), info.Size())
 						atomic.AddInt64(&estimatedTotal, 1)
 						if addErr != nil {
 							fmt.Printf("Error adding file to Pebble during migration for %s: %v\n", path, addErr)
@@ -588,10 +583,9 @@ func main() {
 		day := c.Param("day")
 		filename := c.Param("filename")
 
-		// check is archived from pebble db
-		path := filepath.Join(dataPath, year, month, day, filename)
-		relPath, _ := filepath.Rel(dataPathParent, path)
-		meta, err := getFileFromPebble(db, relPath)
+		// check is archived from pebble db (use absolute path as key)
+		filePath := filepath.Join(dataPath, year, month, day, filename)
+		meta, err := getFileFromPebble(db, filePath)
 		if err == nil {
 			if meta.IsArchived {
 				c.JSON(410, gin.H{"error": "File is archived"})
@@ -642,9 +636,8 @@ func main() {
 		day := c.Param("day")
 		filename := c.Param("filename")
 
-		path := filepath.Join(dataPath, year, month, day, filename)
-		relPath, _ := filepath.Rel(dataPathParent, path)
-		meta, err := getFileFromPebble(db, relPath)
+		filePath := filepath.Join(dataPath, year, month, day, filename)
+		meta, err := getFileFromPebble(db, filePath)
 		if err != nil {
 			c.JSON(404, gin.H{"error": "File not found"})
 			return
@@ -657,15 +650,14 @@ func main() {
 			return
 		}
 
-		err = db.Set([]byte(relPath), valueBytes, pebble.Sync)
+		err = db.Set([]byte(filePath), valueBytes, pebble.Sync)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Failed to archive file"})
 			return
 		}
 
 		// delete the actual file
-		fullPath := filepath.Join(dataPath, year, month, day, filename)
-		err = os.Remove(fullPath)
+		err = os.Remove(filePath)
 		if err != nil {
 			fmt.Printf("Error deleting archived file: %v\n", err)
 		}
