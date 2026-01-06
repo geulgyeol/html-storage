@@ -161,6 +161,18 @@ type FileInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+type Job struct {
+	ID              string
+	Body            string
+	Blog            string
+	Timestamp       int64
+	IsPrecompressed bool
+	EnqueuedAt      time.Time
+	ResultChan      chan error
+}
+
+var jobQueue chan Job
+
 // atomic total - use atomic operations for lock-free updates
 var estimatedTotal int64
 
@@ -341,6 +353,55 @@ func getFileFromPebble(db *pebble.DB, filePath string) (FileMetadata, error) {
 	return dbValue, nil
 }
 
+func startWorkerPool(numWorkers int, db *pebble.DB, dataPath string) {
+	jobQueue = make(chan Job, numWorkers*2)
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			for job := range jobQueue {
+				start := time.Now()
+				fileQueuingDuration.Observe(time.Since(job.EnqueuedAt).Seconds())
+
+				var data []byte
+				var err error
+
+				if job.IsPrecompressed {
+					data, err = base64.StdEncoding.DecodeString(job.Body)
+					if err != nil {
+						job.ResultChan <- fmt.Errorf("error decoding base64: %w", err)
+						continue
+					}
+				} else {
+					data = compressHTML(job.Body)
+				}
+
+				dir := getDir(dataPath, job.Timestamp)
+				path := getFilename(job.ID, job.Blog)
+
+				err = saveHTML(dir, path, data)
+				if err != nil {
+					job.ResultChan <- fmt.Errorf("error saving HTML: %w", err)
+					continue
+				}
+
+				filePushTotal.Inc()
+				atomic.AddInt64(&estimatedTotal, 1)
+
+				err = addFileToPebble(db, path, filepath.Join(dir, path), job.Timestamp, int64(len(data)))
+				if err != nil {
+					job.ResultChan <- fmt.Errorf("error adding file metadata to Pebble: %w", err)
+					// We continue even if pebble update fails, consistent with batch logic, or return error?
+					// Original simple handler returned 500. Batch handler logged.
+					// Let's rely on caller to decide.
+					continue
+				}
+
+				fileWriteDuration.Observe(time.Since(start).Seconds())
+				job.ResultChan <- nil
+			}
+		}()
+	}
+}
+
 func main() {
 	gin.SetMode(gin.ReleaseMode)
 
@@ -352,6 +413,7 @@ func main() {
 	doZstdMigration := parser.Flag("", "do-zstd-migration", &argparse.Options{Help: "Perform background migration from Gzip to Zstd compression", Default: false})
 	doPebbleMigration := parser.Flag("", "do-pebble-migration", &argparse.Options{Help: "Perform background migration to Pebble DB storage", Default: false})
 	cleanArchivedFiles := parser.Flag("", "clean-archived-files", &argparse.Options{Help: "Clean up archived files to DB", Default: false})
+	poolSize := parser.Int("", "worker-pool-size", &argparse.Options{Default: 32, Help: "Number of workers in the worker pool"})
 
 	err := parser.Parse(os.Args)
 	if err != nil {
@@ -395,6 +457,8 @@ func main() {
 			fmt.Printf("Error closing database: %v\n", err)
 		}
 	}(db)
+
+	startWorkerPool(*poolSize, db, dataPath)
 
 	// In background, find .gz files under dataPath and ungzip, then recompress with zstd and save
 	if *doZstdMigration {
@@ -677,30 +741,25 @@ func main() {
 			return
 		}
 
-		start := time.Now()
+		isPrecompressed := c.DefaultQuery("is_precompressed", "false") == "true"
+		resultChan := make(chan error, 1)
 
-		compressedHTML := compressHTML(body.Body)
-		dir := getDir(dataPath, body.Timestamp)
-		path := getFilename(c.Param("id"), body.Blog)
+		jobQueue <- Job{
+			ID:              c.Param("id"),
+			Body:            body.Body,
+			Blog:            body.Blog,
+			Timestamp:       body.Timestamp,
+			IsPrecompressed: isPrecompressed,
+			EnqueuedAt:      time.Now(),
+			ResultChan:      resultChan,
+		}
 
-		err := saveHTML(dir, path, compressedHTML)
+		err := <-resultChan
 		if err != nil {
-			fmt.Printf("Error saving HTML: %v\n", err)
+			fmt.Printf("%v\n", err)
 			c.JSON(500, gin.H{"error": "Failed to save HTML"})
 			return
 		}
-
-		filePushTotal.Inc()
-		atomic.AddInt64(&estimatedTotal, 1)
-
-		err = addFileToPebble(db, path, filepath.Join(dir, path), body.Timestamp, int64(len(compressedHTML)))
-		if err != nil {
-			fmt.Printf("Error adding file metadata to Pebble: %v\n", err)
-			c.JSON(500, gin.H{"error": "Failed to add file metadata"})
-			return
-		}
-
-		fileWriteDuration.Observe(time.Since(start).Seconds())
 
 		c.JSON(200, gin.H{"status": "success"})
 	})
@@ -717,34 +776,30 @@ func main() {
 			return
 		}
 
+		isPrecompressed := c.DefaultQuery("is_precompressed", "false") == "true"
+
+		resultChans := make([]chan error, 0, len(body))
+
 		for id, fileData := range body {
-			go func(id string, fileData struct {
-				Body      string `json:"body"`
-				Blog      string `json:"blog"`
-				Timestamp int64  `json:"timestamp"`
-			}) {
-				start := time.Now()
+			rc := make(chan error, 1)
+			jobQueue <- Job{
+				ID:              id,
+				Body:            fileData.Body,
+				Blog:            fileData.Blog,
+				Timestamp:       fileData.Timestamp,
+				IsPrecompressed: isPrecompressed,
+				EnqueuedAt:      time.Now(),
+				ResultChan:      rc,
+			}
+			resultChans = append(resultChans, rc)
+		}
 
-				compressedHTML := compressHTML(fileData.Body)
-				dir := getDir(dataPath, fileData.Timestamp)
-				path := getFilename(id, fileData.Blog)
-
-				err := saveHTML(dir, path, compressedHTML)
-				if err != nil {
-					fmt.Printf("Error saving HTML in batch for id %s: %v\n", id, err)
-					return
-				}
-
-				filePushTotal.Inc()
-				atomic.AddInt64(&estimatedTotal, 1)
-
-				err = addFileToPebble(db, path, filepath.Join(dir, path), fileData.Timestamp, int64(len(compressedHTML)))
-				if err != nil {
-					fmt.Printf("Error adding file metadata to Pebble in batch for id %s: %v\n", id, err)
-				}
-
-				fileWriteDuration.Observe(time.Since(start).Seconds())
-			}(id, fileData)
+		// Wait for all workers to finish
+		for _, rc := range resultChans {
+			err := <-rc
+			if err != nil {
+				fmt.Printf("Error processing batch item: %v\n", err)
+			}
 		}
 
 		c.JSON(200, gin.H{"status": "success"})
