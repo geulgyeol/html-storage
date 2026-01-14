@@ -729,6 +729,98 @@ func main() {
 		c.JSON(200, gin.H{"status": "file archived"})
 	})
 
+	r.POST("/batch-get", func(c *gin.Context) {
+		var req struct {
+			Paths []string `json:"paths"`
+		}
+
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
+			return
+		}
+
+		doDecompress := c.DefaultQuery("decompress", "true") == "true"
+		results := make(map[string]interface{})
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+
+		// Limit concurrency to avoid overwhelming the system
+		sem := make(chan struct{}, 16)
+
+		for _, relPath := range req.Paths {
+			wg.Add(1)
+			go func(relPath string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				parts := strings.Split(relPath, "/")
+				if len(parts) != 4 {
+					mu.Lock()
+					results[relPath] = gin.H{"error": "Invalid path format"}
+					mu.Unlock()
+					return
+				}
+				year, month, day, filename := parts[0], parts[1], parts[2], parts[3]
+
+				filePath := filepath.Join(dataPath, year, month, day, filename)
+				meta, err := getFileFromPebble(db, filePath)
+				if err == nil {
+					if meta.IsArchived {
+						mu.Lock()
+						results[relPath] = gin.H{"error": "File is archived", "code": 410}
+						mu.Unlock()
+						return
+					}
+				} else {
+					mu.Lock()
+					results[relPath] = gin.H{"error": "File metadata not found", "code": 404}
+					mu.Unlock()
+					return
+				}
+
+				content, err := readFile(dataPath, year, month, day, filename)
+				if err != nil {
+					mu.Lock()
+					if os.IsNotExist(err) {
+						results[relPath] = gin.H{"error": "File not found", "code": 404}
+					} else {
+						results[relPath] = gin.H{"error": fmt.Sprintf("Failed to read file: %v", err), "code": 500}
+					}
+					mu.Unlock()
+					return
+				}
+
+				if doDecompress {
+					decompressedContent, err := decompressHTML(filename, content)
+					if err != nil {
+						mu.Lock()
+						results[relPath] = gin.H{"error": fmt.Sprintf("Failed to decompress file: %v", err), "code": 500}
+						mu.Unlock()
+						return
+					}
+					mu.Lock()
+					results[relPath] = gin.H{
+						"content": decompressedContent,
+						"path":    relPath,
+					}
+					mu.Unlock()
+				} else {
+					encodedContent := base64.StdEncoding.EncodeToString(content)
+					mu.Lock()
+					results[relPath] = gin.H{
+						"content": encodedContent,
+						"path":    relPath,
+					}
+					mu.Unlock()
+				}
+			}(relPath)
+		}
+
+		wg.Wait()
+		c.JSON(200, gin.H{"results": results})
+	})
+
 	r.POST("/:id", func(c *gin.Context) {
 		var body struct {
 			Body      string `json:"body"`
