@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,6 +25,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/valyala/gozstd"
+)
+
+// Bundle format v2 constants
+var (
+	BundleMagic      = []byte("GLGYBNDL")
+	BundleSyncMarker = []byte{0x00, 0xE2, 0x9C, 0xA6, 0x47, 0x4C, 0x47, 0x59}
+)
+
+const (
+	BundleVersion        = uint16(2)
+	BundleFileHeaderSize = 12 // 8 magic + 2 version + 2 dict version
+	BundleSyncMarkerSize = 8
 )
 
 var (
@@ -73,6 +87,7 @@ var (
 )
 
 var cdict *gozstd.CDict
+var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
 func compressHTML(html string) []byte {
 	start := time.Now()
@@ -107,6 +122,7 @@ type BundleEntry struct {
 	Blog    string `json:"blog"`
 	PostURL string `json:"post_url"`
 	TS      int64  `json:"ts"`
+	CRC32   uint32 `json:"crc32"`
 }
 
 var bundleMutexes sync.Map
@@ -141,7 +157,25 @@ func getActiveBundlePath(baseBundlePath string, maxBundleSize int64) string {
 	}
 }
 
-func appendToBundle(bundlePath string, entry BundleEntry, data []byte, maxBundleSize int64) (actualBundlePath string, offset int64, length int64, err error) {
+func ensureBundleFile(path string, dictVersion uint16) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	var header [BundleFileHeaderSize]byte
+	copy(header[:8], BundleMagic)
+	binary.BigEndian.PutUint16(header[8:10], BundleVersion)
+	binary.BigEndian.PutUint16(header[10:12], dictVersion)
+	_, err = f.Write(header[:])
+	return err
+}
+
+func appendToBundle(bundlePath string, entry BundleEntry, data []byte, maxBundleSize int64, dictVersion uint16) (actualBundlePath string, offset int64, length int64, err error) {
 	actualBundlePath = getActiveBundlePath(bundlePath, maxBundleSize)
 
 	dir := filepath.Dir(actualBundlePath)
@@ -152,36 +186,42 @@ func appendToBundle(bundlePath string, entry BundleEntry, data []byte, maxBundle
 		dirCache.Store(dir, struct{}{})
 	}
 
-	f, err := os.OpenFile(actualBundlePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err := ensureBundleFile(actualBundlePath, dictVersion); err != nil {
+		return "", 0, 0, err
+	}
+
+	f, err := os.OpenFile(actualBundlePath, os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return "", 0, 0, err
 	}
 	defer f.Close()
 
-	headerStart, err := f.Seek(0, io.SeekEnd)
+	entryStart, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		return "", 0, 0, err
 	}
 
+	// Populate computed fields
 	entry.Size = len(data)
+	entry.CRC32 = crc32.Checksum(data, crc32cTable)
+
 	headerBytes, err := json.Marshal(entry)
 	if err != nil {
 		return "", 0, 0, err
 	}
 	headerBytes = append(headerBytes, '\n')
 
-	if _, err := f.Write(headerBytes); err != nil {
+	// Build single buffer: sync marker + JSON header + payload
+	buf := make([]byte, 0, BundleSyncMarkerSize+len(headerBytes)+len(data))
+	buf = append(buf, BundleSyncMarker...)
+	buf = append(buf, headerBytes...)
+	buf = append(buf, data...)
+
+	if _, err := f.Write(buf); err != nil {
 		return "", 0, 0, err
 	}
 
-	offset = headerStart + int64(len(headerBytes))
-	length = int64(len(data))
-
-	if _, err := f.Write(data); err != nil {
-		return "", 0, 0, err
-	}
-
-	return actualBundlePath, offset, length, nil
+	return actualBundlePath, entryStart, int64(len(buf)), nil
 }
 
 func makeBundleDBPath(bundlePath string, offset, length int64) string {
@@ -277,7 +317,7 @@ func addFileToDB(queries *db.Queries, blog, postURL, filePath string, timestamp 
 	})
 }
 
-func startWorkerPool(numWorkers int, queries *db.Queries, dataPath string, maxBundleSize int64) {
+func startWorkerPool(numWorkers int, queries *db.Queries, dataPath string, maxBundleSize int64, dictVersion uint16) {
 	jobQueue = make(chan Job, numWorkers*2)
 	for i := 0; i < numWorkers; i++ {
 		go func() {
@@ -315,7 +355,7 @@ func startWorkerPool(numWorkers int, queries *db.Queries, dataPath string, maxBu
 				appendStart := time.Now()
 				mu := getBundleMutex(bundlePath)
 				mu.Lock()
-				actualBundlePath, offset, length, appendErr := appendToBundle(bundlePath, entry, data, maxBundleSize)
+				actualBundlePath, offset, length, appendErr := appendToBundle(bundlePath, entry, data, maxBundleSize, dictVersion)
 				mu.Unlock()
 				fileSaveDuration.Observe(time.Since(appendStart).Seconds())
 				if appendErr != nil {
@@ -351,6 +391,7 @@ func main() {
 	zstdDictionaryPath := parser.String("z", "zstd-dictionary", &argparse.Options{Default: "./zstd_dict_v2", Help: "Path to Zstd dictionary file"})
 	poolSize := parser.Int("", "worker-pool-size", &argparse.Options{Default: 32, Help: "Number of workers in the worker pool"})
 	maxBundleSize := parser.Int("", "max-bundle-size", &argparse.Options{Default: 4294967296, Help: "Maximum bundle file size in bytes before creating a new segment"})
+	dictVersionArg := parser.Int("", "dict-version", &argparse.Options{Default: 2, Help: "Zstd dictionary version number for bundle file headers"})
 
 	err := parser.Parse(os.Args)
 	if err != nil {
@@ -380,7 +421,7 @@ func main() {
 
 	queries := db.New(pool)
 
-	startWorkerPool(*poolSize, queries, dataPath, int64(*maxBundleSize))
+	startWorkerPool(*poolSize, queries, dataPath, int64(*maxBundleSize), uint16(*dictVersionArg))
 
 	go func() {
 		for {
